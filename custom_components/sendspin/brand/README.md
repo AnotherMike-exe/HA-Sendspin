@@ -1,7 +1,18 @@
 # Brand assets
 
+> **`icon.png` here is a PLACEHOLDER.** It exists only to satisfy the HACS
+> `brands` check so CI is green. Replace it before release with the real mark —
+> either the Plum logo or a Sendspin one.
+
 HACS **requires** a `brand/` directory containing at least `icon.png` for a custom
 integration to publish. These are binary assets and are not scaffolded.
+
+HACS looks for `custom_components/sendspin/brand/icon.png` **first** and only
+falls back to the `home-assistant/brands` repository if it is absent. A local
+icon is therefore enough to pass validation. Getting the icon to render inside
+the Home Assistant UI itself still needs a PR adding
+`custom_integrations/sendspin/` to `home-assistant/brands`, but that is not a
+CI blocker.
 
 Required:
 
