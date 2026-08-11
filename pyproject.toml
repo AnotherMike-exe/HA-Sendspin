@@ -1,0 +1,17 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Required by pytest-homeassistant-custom-component.
+asyncio_mode = "auto"
+# pytest-asyncio 1.x warns without this; "function" matches HA's own default.
+asyncio_default_fixture_loop_scope = "function"

@@ -1,0 +1,15 @@
+# Dev/test dependencies. Runtime deps belong in custom_components/sendspin/manifest.json.
+#
+# pytest-homeassistant-custom-component pins a specific Home Assistant version.
+# Pin it deliberately and bump it on purpose — an unpinned bump silently changes
+# which HA release the tests validate against.
+#
+# 0.13.355 pins homeassistant==2026.8.1, which is the live deploy target (see
+# docs/DEPLOYMENT-TESTING.md). It requires Python 3.14 — phacc cut over to
+# `requires_python >=3.14` at 0.13.317, so anything older silently drags the
+# suite back to an HA release the integration is not shipped against.
+#
+# A bare `0.13.*` is NOT a pin: on Python 3.13 it resolves to 0.13.316, which
+# pins homeassistant==2026.2.3 — six releases behind what we deploy to.
+pytest-homeassistant-custom-component==0.13.355
+ruff

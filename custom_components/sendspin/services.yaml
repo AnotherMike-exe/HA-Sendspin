@@ -1,0 +1,38 @@
+# Sendspin routing services.
+#
+# NOTE: intra-server re-route and cross-server roam are deliberately separate
+# services. They are different operations with different semantics — see
+# docs/OPEN-QUESTIONS.md §3. Do not collapse them into one service.
+
+group_add_player:
+  target:
+    entity:
+      integration: sendspin
+      domain: media_player
+  fields:
+    player_id:
+      required: true
+      selector:
+        text:
+
+group_remove_player:
+  target:
+    entity:
+      integration: sendspin
+      domain: media_player
+  fields:
+    player_id:
+      required: true
+      selector:
+        text:
+
+roam_player:
+  fields:
+    player_id:
+      required: true
+      selector:
+        text:
+    target_server:
+      required: true
+      selector:
+        text:

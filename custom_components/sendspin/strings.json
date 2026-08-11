@@ -1,0 +1,62 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to a Sendspin server",
+        "data": {
+          "listener_url": "Listener URL"
+        },
+        "data_description": {
+          "listener_url": "The Sendspin server's listener URL. This is the stable identity the integration keys entities on."
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Sendspin server discovered",
+        "description": "Do you want to add the Sendspin server {name} to Home Assistant?"
+      }
+    },
+    "abort": {
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    },
+    "error": {
+      "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    }
+  },
+  "services": {
+    "group_add_player": {
+      "name": "Add player to group",
+      "description": "Adds a Sendspin player to the group backing this stream.",
+      "fields": {
+        "player_id": {
+          "name": "Player",
+          "description": "The Sendspin player to add."
+        }
+      }
+    },
+    "group_remove_player": {
+      "name": "Remove player from group",
+      "description": "Removes a Sendspin player from the group backing this stream.",
+      "fields": {
+        "player_id": {
+          "name": "Player",
+          "description": "The Sendspin player to remove."
+        }
+      }
+    },
+    "roam_player": {
+      "name": "Roam player to another server",
+      "description": "Moves a Sendspin player to a different server. This is a reconnect-based operation and is not the same as adding a player to a group on the current server.",
+      "fields": {
+        "player_id": {
+          "name": "Player",
+          "description": "The Sendspin player to move."
+        },
+        "target_server": {
+          "name": "Target server",
+          "description": "The Sendspin server that should claim the player."
+        }
+      }
+    }
+  }
+}

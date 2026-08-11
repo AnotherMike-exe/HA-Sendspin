@@ -1,0 +1,7 @@
+{
+  "services": {
+    "group_add_player": "mdi:speaker-multiple",
+    "group_remove_player": "mdi:speaker-off",
+    "roam_player": "mdi:transit-connection-variant"
+  }
+}
