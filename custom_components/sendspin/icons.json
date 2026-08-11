@@ -1,0 +1,7 @@
+{
+  "services": {
+    "adopt_player": "mdi:speaker-plus",
+    "release_player": "mdi:speaker-off",
+    "reclaim_player": "mdi:account-arrow-left"
+  }
+}

@@ -15,6 +15,8 @@ from homeassistant.config_entries import SOURCE_USER, SOURCE_ZEROCONF
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -231,3 +233,38 @@ async def test_adoptions_are_restored_on_restart(
 
     assert [c.url for c in fake_server.dial_calls] == [PLAYER_URL]
     assert len(hass.states.async_entity_ids("media_player")) == 1
+
+
+async def test_the_entity_is_keyed_on_the_frozen_url(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The unique id scheme is a compatibility promise, not an implementation detail.
+
+    Changing it orphans every existing entity, discarding each user's renames,
+    areas and icons. It is built from the listener URL as first seen — the only
+    identifier a speaker presents both while attached and while idle — and
+    never from the client id, which is a MAC in one view and an mDNS instance
+    name in the other.
+    """
+    await setup_hub(
+        hass,
+        fake_server,
+        subentries=[
+            {
+                "subentry_type": SUBENTRY_TYPE_PLAYER,
+                "title": "Satellite1",
+                "data": {CONF_LISTENER_URL: PLAYER_URL},
+                "unique_id": PLAYER_URL,
+            }
+        ],
+    )
+
+    registry = er.async_get(hass)
+    entity_id = hass.states.async_entity_ids("media_player")[0]
+    assert registry.async_get(entity_id).unique_id == f"player:{PLAYER_URL}"
+
+    # And the device is keyed on the same thing, so services can target it.
+    assert (
+        dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
+        is not None
+    )

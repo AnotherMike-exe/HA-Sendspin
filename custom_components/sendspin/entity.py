@@ -24,6 +24,7 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
         """
         super().__init__(coordinator)
         self._frozen_url = frozen_url
+        self._attr_unique_id = f"player:{frozen_url}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, frozen_url)},
             name=coordinator.memo.display_name(frozen_url),

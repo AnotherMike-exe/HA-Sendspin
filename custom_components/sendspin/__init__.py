@@ -21,6 +21,7 @@ from .identity import async_load_identity, async_load_pairing_store
 from .models import SendspinRuntimeData
 from .player_memo import PlayerMemo
 from .server_host import async_create_server_host
+from .services import async_register_services
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -60,6 +61,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
     await _async_restore_adoptions(entry, host, coordinator, memo)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
+    # Registered once per Home Assistant, not per entry — services are global,
+    # and re-registering on reload would replace handlers mid-call.
+    async_register_services(hass)
     return True
 
 

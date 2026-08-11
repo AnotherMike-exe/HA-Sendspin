@@ -1,0 +1,46 @@
+# Sendspin adoption lifecycle.
+#
+# Routing is NOT here: it is media_player.select_source on the endpoint entity,
+# arriving in M4. Group add/remove and roam were retired — several endpoints on
+# one source IS the group, which is Sendspin's own semantics.
+#
+# No service takes a player_id. Speakers are picked with a device selector
+# filtered to this integration; the only raw identifier accepted anywhere is
+# the listener URL, on adopt_player, where by definition no device exists yet.
+#
+# A device *selector* rather than `target:` — hassfest rejects device filters
+# on target, and an unfiltered target would offer every device in the house.
+
+adopt_player:
+  fields:
+    listener_url:
+      required: true
+      example: ws://192.168.1.50:8928/sendspin
+      selector:
+        text:
+
+release_player:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: sendspin
+          multiple: true
+
+reclaim_player:
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:
+          integration: sendspin
+          multiple: true
+    timeout:
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: seconds

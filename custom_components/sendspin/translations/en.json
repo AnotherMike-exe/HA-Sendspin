@@ -57,5 +57,58 @@
         "invalid_url": "That is not a valid Sendspin address. It should look like ws://192.168.1.50:8928/sendspin"
       }
     }
+  },
+  "services": {
+    "adopt_player": {
+      "name": "Adopt speaker",
+      "description": "Makes Home Assistant the Sendspin server for a speaker. If another Sendspin server is using it, that server will lose it, and it may take it straight back.",
+      "fields": {
+        "listener_url": {
+          "name": "Speaker address",
+          "description": "The speaker's Sendspin address, for example ws://192.168.1.50:8928/sendspin. The listener URL is used because it is the only identifier a speaker presents both while attached and while idle."
+        }
+      }
+    },
+    "release_player": {
+      "name": "Release speaker",
+      "description": "Stops holding a speaker so another Sendspin server, such as Music Assistant, can take it.",
+      "fields": {
+        "device_id": {
+          "name": "Speaker",
+          "description": "The Sendspin speaker to act on."
+        }
+      }
+    },
+    "reclaim_player": {
+      "name": "Reclaim speaker",
+      "description": "Takes a speaker back from whichever server currently holds it. Adoption is deliberately polite and gives up when another server claims a speaker; this overrides that.",
+      "fields": {
+        "device_id": {
+          "name": "Speaker",
+          "description": "The Sendspin speaker to act on."
+        },
+        "timeout": {
+          "name": "Timeout",
+          "description": "How long to wait for the speaker to come back."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "not_loaded": {
+      "message": "Sendspin is not set up, or failed to start."
+    },
+    "invalid_url": {
+      "message": "{url} is not a valid Sendspin address. It should look like ws://192.168.1.50:8928/sendspin"
+    },
+    "unknown_device": {
+      "message": "No such device: {device_id}."
+    },
+    "not_a_sendspin_device": {
+      "message": "That device is not a Sendspin speaker."
+    },
+    "never_seen": {
+      "message": "{url} has never connected, so there is nothing to reclaim yet."
+    }
   }
 }
