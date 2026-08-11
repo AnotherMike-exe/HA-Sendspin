@@ -1,4 +1,6 @@
-# Dev/test dependencies. Runtime deps belong in custom_components/sendspin/manifest.json.
+# Dev/test dependencies.
+#
+# --- Test harness ----------------------------------------------------------
 #
 # pytest-homeassistant-custom-component pins a specific Home Assistant version.
 # Pin it deliberately and bump it on purpose — an unpinned bump silently changes
@@ -13,3 +15,23 @@
 # pins homeassistant==2026.2.3 — six releases behind what we deploy to.
 pytest-homeassistant-custom-component==0.13.355
 ruff
+
+# --- Runtime dependencies, mirrored ----------------------------------------
+#
+# These are declared for Home Assistant in custom_components/sendspin/manifest.json,
+# which is what installs them on a real instance. They are duplicated here
+# because the test suite imports them directly and nothing else would install
+# them in CI.
+#
+# KEEP IN SYNC WITH manifest.json "requirements". The duplication is
+# unavoidable — the same hazard as the zeroconf service types in const.py.
+#
+# numpy and pillow are not optional extras: aiosendspin.server.server cannot be
+# imported without them (the artwork role imports PIL and the visualizer roles
+# import numpy at module level, and both are imported eagerly for role
+# registration). HA core ships Pillow but NOT numpy. `av` is deliberately
+# excluded — it is only reached when encoding audio, which a source-less server
+# never does.
+aiosendspin==9.1.0
+numpy>=1.26.0
+pillow>=11.0.0
