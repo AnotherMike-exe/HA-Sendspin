@@ -86,6 +86,20 @@ _NON_RETRYABLE_GOODBYES: frozenset[GoodbyeReason] = frozenset(
     }
 )
 
+# A contested speaker does not always say goodbye. Observed on a live network:
+# Home Assistant and a Plum-Audio unit both held retrying dials against the same
+# player, which dropped the socket with close_code=None and no goodbye at all,
+# so the reason-based rule above never fired and the two servers traded the
+# speaker back and forth indefinitely.
+#
+# So also give up when a speaker churns: this many disconnects inside this
+# window means something else wants it, whatever it does or does not tell us.
+_FLAP_THRESHOLD = 3
+_FLAP_WINDOW_S = 120.0
+
+YIELD_CONTESTED = "contested"
+"""Reason recorded when a speaker flaps rather than saying goodbye."""
+
 
 def player_role(client: object) -> object | None:
     """Return a client's player role, or None if it has none.
@@ -139,7 +153,8 @@ class ServerHost:
         self.server = server
         self.identity = identity
         self._adopted: set[str] = set()
-        self._yielded: dict[str, GoodbyeReason] = {}
+        self._yielded: dict[str, str] = {}
+        self._disconnects: dict[str, list[float]] = {}
         self._url_by_client_id: dict[str, str] = {}
         self._unsubscribe: Callable[[], None] | None = server.add_event_listener(
             self._on_server_event
@@ -156,7 +171,7 @@ class ServerHost:
         return frozenset(self._adopted)
 
     @property
-    def yielded_urls(self) -> dict[str, GoodbyeReason]:
+    def yielded_urls(self) -> dict[str, str]:
         """Adopted URLs we have stopped dialling, and why.
 
         These are still adopted — the user asked for them — but another server
@@ -194,6 +209,7 @@ class ServerHost:
         await self._async_stop_dialing(dial_url)
         self._adopted.add(dial_url)
         self._yielded.pop(dial_url, None)
+        self._disconnects.pop(dial_url, None)
         _LOGGER.debug("Adopting Sendspin player at %s", dial_url)
         self.server.connect_to_client(
             dial_url,
@@ -206,6 +222,7 @@ class ServerHost:
         """Stop holding a player so another server can have it."""
         self._adopted.discard(dial_url)
         self._yielded.pop(dial_url, None)
+        self._disconnects.pop(dial_url, None)
         _LOGGER.debug("Releasing Sendspin player at %s", dial_url)
         await self._async_stop_dialing(dial_url)
 
@@ -236,6 +253,7 @@ class ServerHost:
             await self._async_stop_dialing(dial_url)
         self._adopted.clear()
         self._yielded.clear()
+        self._disconnects.clear()
         self._url_by_client_id.clear()
         await self.server.close()
 
@@ -250,23 +268,42 @@ class ServerHost:
 
         if not isinstance(event, ClientDisconnectedEvent):
             return
-        if event.goodbye_reason not in _NON_RETRYABLE_GOODBYES:
-            return  # transient — let retry_indefinitely do its job
         if (url := self._url_for_client_id(event.client_id)) is None:
             return
         if url not in self._adopted:
             return
 
-        self._yielded[url] = event.goodbye_reason
+        reason = self._yield_reason(url, event.goodbye_reason)
+        if reason is None:
+            return  # transient — let retry_indefinitely do its job
+
+        self._yielded[url] = reason
         _LOGGER.info(
-            "Sendspin player %s said goodbye (%s); giving up the dial rather "
-            "than fighting for it. Use the reclaim service to take it anyway",
+            "Giving up the dial to Sendspin player %s (%s) rather than "
+            "fighting for it. Use the reclaim service to take it anyway",
             url,
-            event.goodbye_reason.value,
+            reason,
         )
         self.hass.async_create_task(
             self._async_stop_dialing(url), f"sendspin-stop-dial-{url}"
         )
+
+    def _yield_reason(self, url: str, goodbye: GoodbyeReason | None) -> str | None:
+        """Decide whether this disconnect means we should stop dialling.
+
+        Two independent triggers, because a contested speaker does not reliably
+        announce itself: an explicit non-retryable goodbye, or simply churning.
+        """
+        if goodbye in _NON_RETRYABLE_GOODBYES:
+            return goodbye.value
+
+        now = self.hass.loop.time()
+        recent = [t for t in self._disconnects.get(url, ()) if now - t < _FLAP_WINDOW_S]
+        recent.append(now)
+        self._disconnects[url] = recent
+        if len(recent) >= _FLAP_THRESHOLD:
+            return YIELD_CONTESTED
+        return None
 
     def _url_for_client_id(self, client_id: str) -> str | None:
         """Map a client id back to the URL we dial it on.

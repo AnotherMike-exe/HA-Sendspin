@@ -33,6 +33,7 @@ from aiosendspin.server.server import (
     SendspinServer,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_track_time_interval
@@ -245,8 +246,29 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         frozen_url = self._frozen_url_for_dial(dial_url)
         if frozen_url is None:
             return
+        before = self.memo.display_name(frozen_url)
         self.memo.remember_handshake(frozen_url, name=client.name, client_id=client_id)
         self.memo.async_schedule_save()
+
+        after = self.memo.display_name(frozen_url)
+        if after != before:
+            self._rename_device(frozen_url, after)
+
+    @callback
+    def _rename_device(self, frozen_url: str, name: str) -> None:
+        """Apply a better name to the device once we learn one.
+
+        A speaker's good name is only visible while it is attached, which is
+        after its entity has already been created. Without this the device
+        keeps whatever it was called at adoption — usually its address.
+
+        This sets the device's *original* name; any name the user has chosen
+        takes precedence in the UI and is untouched.
+        """
+        registry = dr.async_get(self.hass)
+        device = registry.async_get_device(identifiers={(DOMAIN, frozen_url)})
+        if device is not None and device.name != name:
+            registry.async_update_device(device.id, name=name)
 
     def _frozen_url_for_dial(self, dial_url: str) -> str | None:
         """Resolve a live dial URL back to the endpoint's frozen identity."""
@@ -257,9 +279,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
     def _build_snapshot(self) -> SendspinData:
         """Assemble what the entities render."""
-        yielded_by_dial = {
-            url: reason.value for url, reason in self.host.yielded_urls.items()
-        }
+        yielded_by_dial = self.host.yielded_urls
         endpoints: dict[str, EndpointSnapshot] = {}
 
         for frozen_url in self._endpoints:

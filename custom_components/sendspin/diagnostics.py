@@ -77,8 +77,6 @@ async def async_get_config_entry_diagnostics(
         },
         "adoption": {
             "dialing": sorted(runtime.host.adopted_urls),
-            "yielded": {
-                url: reason.value for url, reason in runtime.host.yielded_urls.items()
-            },
+            "yielded": dict(runtime.host.yielded_urls),
         },
     }

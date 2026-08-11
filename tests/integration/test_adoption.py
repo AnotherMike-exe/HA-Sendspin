@@ -268,3 +268,77 @@ async def test_the_entity_is_keyed_on_the_frozen_url(
         dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
         is not None
     )
+
+
+# --- Naming ----------------------------------------------------------------
+
+
+async def test_an_adopted_speaker_is_named_after_the_speaker(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The entity must not be named after an IP address.
+
+    A speaker's handshake name only becomes visible once it connects, which is
+    after its entity — and therefore its permanent entity_id — already exists.
+    So the memo has to be seeded from the discovery record *before* the
+    platforms load, or every speaker is called 192_168_7_151_8928 forever.
+    """
+    # Discovery caches the record; this does not adopt anything.
+    await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_ZEROCONF}, data=player_record()
+    )
+    await hass.async_block_till_done()
+
+    await setup_hub(
+        hass,
+        fake_server,
+        subentries=[
+            {
+                "subentry_type": SUBENTRY_TYPE_PLAYER,
+                "title": "Satellite1",
+                "data": {CONF_LISTENER_URL: PLAYER_URL},
+                "unique_id": PLAYER_URL,
+            }
+        ],
+    )
+
+    entity_id = hass.states.async_entity_ids("media_player")[0]
+    assert "192_168" not in entity_id
+    assert "satellite1" in entity_id
+
+
+async def test_the_device_is_renamed_once_the_handshake_name_arrives(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A speaker adopted by URL, with nothing discovered, still gets its name.
+
+    The handshake name is better than anything discovery can offer, and it only
+    exists while the speaker is attached.
+    """
+    from datetime import timedelta
+
+    from aiosendspin.server.server import ClientConnectedEvent
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    fake_server.attach(PLAYER_URL, "98:A3:16:D0:9E:E8", "FutureProofHomes - Satellite1")
+    await setup_hub(
+        hass,
+        fake_server,
+        subentries=[
+            {
+                "subentry_type": SUBENTRY_TYPE_PLAYER,
+                "title": PLAYER_URL,
+                "data": {CONF_LISTENER_URL: PLAYER_URL},
+                "unique_id": PLAYER_URL,
+            }
+        ],
+    )
+
+    fake_server.emit(ClientConnectedEvent(client_id="98:A3:16:D0:9E:E8"))
+    await hass.async_block_till_done()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=1))
+    await hass.async_block_till_done()
+
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
+    assert device.name == "FutureProofHomes - Satellite1"

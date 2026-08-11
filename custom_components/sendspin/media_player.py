@@ -176,7 +176,12 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         version, so a connected endpoint is idle by definition.
         """
         endpoint = self.endpoint
-        if endpoint is None or not endpoint.connected:
+        if endpoint is None:
+            return None
+        if endpoint.yielded_reason is not None:
+            # Alive and probably playing — just not ours to drive.
+            return MediaPlayerState.IDLE
+        if not endpoint.connected:
             return MediaPlayerState.OFF
         return MediaPlayerState.IDLE
 

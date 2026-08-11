@@ -193,7 +193,7 @@ async def test_another_server_goodbye_stops_the_dial(
     # Still adopted: the user asked for it, and the entity should say why it
     # is not held rather than silently disappearing.
     assert PLAYER_URL in host.adopted_urls
-    assert host.yielded_urls == {PLAYER_URL: GoodbyeReason.ANOTHER_SERVER}
+    assert host.yielded_urls == {PLAYER_URL: "another_server"}
 
 
 async def test_a_transient_goodbye_keeps_retrying(
@@ -305,3 +305,70 @@ async def test_close_unhooks_the_event_listener(
     await host.async_close()
 
     assert server.listener_count == 0
+
+
+# --- Flapping --------------------------------------------------------------
+#
+# Observed on the live network: Home Assistant and a Plum-Audio unit both held
+# retrying dials against the same player. It dropped the socket with
+# close_code=None and NO goodbye at all, so the reason-based rule never fired
+# and the two servers traded the speaker back and forth indefinitely.
+
+
+async def test_a_flapping_speaker_is_given_up_even_without_a_goodbye(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """Churn is itself evidence that something else wants the speaker."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+
+    for _ in range(3):
+        server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+        await hass.async_block_till_done()
+
+    assert host.yielded_urls == {PLAYER_URL: "contested"}
+    assert server.live_dial_urls == set()
+    # Still adopted — the user asked for it, and the entity should explain.
+    assert PLAYER_URL in host.adopted_urls
+
+
+async def test_an_occasional_drop_is_not_flapping(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """One or two drops is a flaky network, not a contest.
+
+    Giving up too eagerly would abandon a speaker on a marginal Wi-Fi link,
+    which is exactly the case retry_indefinitely exists for.
+    """
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+
+    for _ in range(2):
+        server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+        await hass.async_block_till_done()
+
+    assert host.yielded_urls == {}
+    assert server.live_dial_urls == {PLAYER_URL}
+
+    await host.async_close()
+
+
+async def test_re_adopting_forgives_past_flapping(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """Asking again must start from a clean slate, not stay one drop from giving up."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+    for _ in range(3):
+        server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+        await hass.async_block_till_done()
+    assert host.yielded_urls
+
+    await host.async_adopt(PLAYER_URL)
+    server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+    await hass.async_block_till_done()
+
+    assert host.yielded_urls == {}
+    assert server.live_dial_urls == {PLAYER_URL}
+
+    await host.async_close()

@@ -37,12 +37,23 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
 
     @property
     def available(self) -> bool:
-        """Whether this endpoint is usable right now.
+        """Whether we know anything trustworthy about this endpoint.
 
         `CoordinatorEntity.available` is only `last_update_success` — a whole-
         coordinator health flag that knows nothing per-item. Without this
         override a speaker that had dropped off would keep reporting its last
         state, and every property access would raise inside a state write.
+
+        A **yielded** speaker still counts as available. Another server holding
+        it is not a fault: the speaker is present and very likely playing. And
+        Home Assistant drops attributes on unavailable entities, so marking it
+        unavailable would hide the `yielded_to` explanation at exactly the
+        moment it is worth reading. Unavailable is reserved for "we cannot see
+        this speaker at all".
         """
         endpoint = self.endpoint
-        return super().available and endpoint is not None and endpoint.connected
+        if endpoint is None:
+            return False
+        return super().available and (
+            endpoint.connected or endpoint.yielded_reason is not None
+        )

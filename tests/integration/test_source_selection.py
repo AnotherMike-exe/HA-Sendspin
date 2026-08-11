@@ -217,3 +217,35 @@ async def test_selecting_an_unknown_stream_fails_clearly(
             {ATTR_ENTITY_ID: entity_id(hass), "source": "Gone / Vanished"},
             blocking=True,
         )
+
+
+async def test_a_yielded_speaker_stays_visible_and_explains_itself(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Another server holding a speaker is not a fault.
+
+    Home Assistant drops attributes on unavailable entities, so marking a
+    yielded speaker unavailable would hide the very explanation the user needs
+    — and would imply the speaker is broken when it is healthy and playing.
+    """
+    from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEvent
+
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    payload["units"][0]["sources"][0]["active"] = True
+    await setup_with_mesh(hass, fake_server, payload)
+
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    for _ in range(3):
+        fake_server.emit(
+            ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None)
+        )
+        await hass.async_block_till_done()
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state != "unavailable"
+    assert state.attributes["yielded_to"] == "contested"
+    # And it still reports which stream it is on, which is the useful part.
+    assert state.attributes["source"] == "Plum Amp100 / 204 AP"

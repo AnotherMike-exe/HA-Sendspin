@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
-from .config_flow import async_mesh_hosts
+from .config_flow import async_discovered_players, async_mesh_hosts
 from .const import CONF_LISTENER_URL, DOMAIN, SUBENTRY_TYPE_PLAYER
 from .coordinator import SendspinCoordinator
 from .identity import async_load_identity, async_load_pairing_store
@@ -62,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
         host=host, coordinator=coordinator, memo=memo
     )
 
-    await _async_restore_adoptions(entry, host, coordinator, memo)
+    await _async_restore_adoptions(hass, entry, host, coordinator, memo)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     # Registered once per Home Assistant, not per entry — services are global,
@@ -82,6 +82,7 @@ async def _async_entry_updated(hass: HomeAssistant, entry: SendspinConfigEntry) 
 
 
 async def _async_restore_adoptions(
+    hass: HomeAssistant,
     entry: SendspinConfigEntry,
     host: object,
     coordinator: SendspinCoordinator,
@@ -92,10 +93,25 @@ async def _async_restore_adoptions(
     Each adopted speaker is a config subentry, so the set survives restarts
     without the integration ever adopting anything the user did not ask for.
     """
+    discovered = async_discovered_players(hass)
     for subentry in entry.subentries.values():
         if subentry.subentry_type != SUBENTRY_TYPE_PLAYER:
             continue
         frozen_url = subentry.data[CONF_LISTENER_URL]
+        # Seed the memo BEFORE the platforms load, so an endpoint's first
+        # entity is named after the speaker rather than its address. The
+        # handshake name only becomes visible once it connects, which is after
+        # the entity — and its entity_id — already exists.
+        if (found := discovered.get(frozen_url)) is not None:
+            memo.remember_discovery(
+                frozen_url,
+                instance_name=found.instance_name,
+                txt_name=found.txt_name,
+            )
+        elif subentry.title:
+            # Adopted before this ran, or by URL with nothing discovered. The
+            # subentry title is what the user already sees.
+            memo.remember_discovery(frozen_url, instance_name=subentry.title)
         coordinator.async_track_endpoint(frozen_url)
         await host.async_adopt(memo.dial_url(frozen_url))
 
