@@ -14,9 +14,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 
 from .config_flow import async_mesh_hosts
-from .const import CONF_LISTENER_URL, SUBENTRY_TYPE_PLAYER
+from .const import CONF_LISTENER_URL, DOMAIN, SUBENTRY_TYPE_PLAYER
 from .coordinator import SendspinCoordinator
 from .identity import async_load_identity, async_load_pairing_store
 from .models import SendspinRuntimeData
@@ -97,6 +98,32 @@ async def _async_restore_adoptions(
         frozen_url = subentry.data[CONF_LISTENER_URL]
         coordinator.async_track_endpoint(frozen_url)
         await host.async_adopt(memo.dial_url(frozen_url))
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant, entry: SendspinConfigEntry, device: dr.DeviceEntry
+) -> bool:
+    """Let the user delete a speaker from the UI.
+
+    Home Assistant's `stale-devices` rule asks for this precisely when an
+    integration cannot be sure a device is gone — which is our situation: a
+    speaker that is switched off is indistinguishable from one that has been
+    thrown away, and we must never prune on absence.
+
+    Removing the device also drops its subentry. Without that the adoption
+    survives, and the next reload re-dials the speaker and re-creates the
+    device the user just deleted.
+    """
+    frozen_urls = {
+        identifier for domain, identifier in device.identifiers if domain == DOMAIN
+    }
+    for subentry in list(entry.subentries.values()):
+        if (
+            subentry.subentry_type == SUBENTRY_TYPE_PLAYER
+            and subentry.data.get(CONF_LISTENER_URL) in frozen_urls
+        ):
+            hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
+    return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> bool:

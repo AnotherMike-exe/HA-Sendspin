@@ -2,8 +2,9 @@
 
 Living document. Update as the codebase evolves.
 
-**Scaffold status**: structure and intent are documented; no behaviour is
-implemented yet. Sections marked *planned* describe design intent, not code.
+**Status**: adoption, presence, volume and source selection are implemented
+and tested. Metadata, artwork, progress and transport are not — see
+[OPEN-QUESTIONS §7](OPEN-QUESTIONS.md).
 
 ---
 
@@ -46,39 +47,41 @@ HA-Sendspin/
 
 ## 2. High-Level System Diagram
 
+**Home Assistant is the dialer, in both directions it participates in.** A
+Sendspin server dials players; players listen. So HA-as-server dials speakers,
+and nothing on the network ever dials HA.
+
 ```
-                        LAN (mDNS / Avahi)
+                        LAN (mDNS, browse only)
                                │
-              ┌────────────────┴─────────────────┐
-              │                                  │
-    [Sendspin Server A]                [Sendspin Server B]
-       │  listener URL                     │  listener URL
-       │                                   │
-       │  controller websocket             │
-       └──────────────┬────────────────────┘
-                      │  (push state)
-                      ▼
-        ┌─────────────────────────────┐
-        │  custom_components/sendspin │
-        │                             │
-        │  discovery.py  ← HA core zeroconf
-        │       │                     │
-        │  config_flow.py → ConfigEntry (unique_id = listener URL)
-        │       │                     │
-        │  coordinator.py  (aiosendspin controller role)
-        │       │                     │
-        │  media_player.py            │
-        └───────┬─────────────────────┘
-                │
-                ▼
-        [Home Assistant core]
-          entity registry · automations · services
+        ┌──────────────────────┼───────────────────────┐
+        │                      │                       │
+  [Speakers]            [Plum-Audio units]      [Music Assistant]
+  _sendspin._tcp        _sendspin-server._tcp    (a Sendspin server)
+  :8928 listening       :8927 + mesh API :5001
+        ▲                      │
+        │ we dial them         │ we GET/POST over HTTP
+        │ (adoption)           │ (source list + routing)
+        │                      ▼
+   ┌────┴──────────────────────────────────────┐
+   │  custom_components/sendspin               │
+   │                                           │
+   │  discovery.py   ← HA core zeroconf        │
+   │  config_flow.py → hub entry + subentries  │
+   │  server_host.py → in-process SendspinServer (source-less, silent)
+   │  mesh.py        → optional Plum federation tier
+   │  coordinator.py → server events (push) + mesh poll (pull)
+   │  media_player.py→ one entity per speaker  │
+   └────────────────┬──────────────────────────┘
+                    ▼
+            [Home Assistant core]
+       entity registry · automations · services
 ```
 
-**Direction of control**: this integration is *client/controller role only*. It
-never renders audio and never advertises itself over mDNS — it only browses.
-
----
+**Why a server and not a controller client.** A controller-role client can send
+transport commands and observe only the group it currently occupies. No wire
+message lists groups, lists players, or moves a player between groups. Adoption
+and routing exist solely as in-process Python on a `SendspinServer`.
 
 ## 3. Core Components
 
@@ -102,11 +105,17 @@ Two paths: manual listener-URL entry, and a zeroconf-triggered discovery flow
 Unique id is the **listener URL**. See ARCHITECTURE §7 and
 [OPEN-QUESTIONS §2](OPEN-QUESTIONS.md#2-entity-identity--🔴-blocking).
 
-### 3.3. Coordinator (`coordinator.py`) — *planned*
+### 3.3. Coordinator (`coordinator.py`)
 
-A `DataUpdateCoordinator` used **without a poll interval**. The controller
-websocket pushes state; the coordinator calls `async_set_updated_data` from the
-websocket callback.
+A `DataUpdateCoordinator` used **without a poll interval**. The source of truth
+is the in-process server's *event stream*, not a controller websocket. Mesh
+state is polled separately on a 5s timer, because Plum aggregates on 2s and
+faster buys nothing.
+
+**Invariant: the endpoint set is the adopted set, never the connected set.** A
+speaker that drops off goes `unavailable`; it never disappears. Pruning on
+disconnect would make a network hiccup indistinguishable from the user removing
+a speaker.
 
 Server/player reachability maps onto **entity availability** — this is what lets
 HA automations trigger on a stream coming online or a player dropping off the
@@ -116,23 +125,42 @@ On disconnect the coordinator marks data unavailable and schedules a reconnect
 rather than tearing down entities, so a brief mesh blip does not orphan entity
 registry entries.
 
-### 3.4. Media player platform (`media_player.py`) — *planned*
+### 3.4. Media player platform (`media_player.py`)
 
-One entity per active stream/group: source, transport controls, and metadata /
-artwork via the Sendspin metadata role.
+**One durable entity per physical speaker**, not per stream. Streams come and
+go constantly; anchoring entities to them would churn the entity registry and
+discard the user's renames, areas and icons on every reconnect.
 
-### 3.5. Routing services — *planned*
+Available streams instead populate each speaker's `source_list`, and
+`select_source` is the routing verb. Several speakers selecting the same source
+*is* the group — Sendspin's own semantics — so no grouping feature is
+advertised.
 
-Registered in `__init__.py`, described in `services.yaml`. Intra-server re-route
-and cross-server roam are **separate services with different semantics** — see
-[OPEN-QUESTIONS §3](OPEN-QUESTIONS.md#3-scope-of-routing--🟡-needs-a-design-pass).
+### 3.5. Services (`services.py`)
+
+The **adoption lifecycle only**: `adopt_player`, `release_player`,
+`reclaim_player`. Routing is not a service — it is `media_player.select_source`.
+
+No service takes a `player_id`. They target Home Assistant devices, and the one
+raw identifier accepted anywhere is the listener URL, on `adopt_player`, where
+by definition no device exists yet.
 
 ---
 
 ## 4. Data Stores
 
-None. State is ephemeral and lives in the coordinator; the only persistence is
-Home Assistant's own config entry and entity registry storage.
+**Three, and two of them hold secrets.** An earlier version of this document
+said "None", which was wrong and is worth stating plainly because it is a
+security-relevant claim.
+
+| Store | Contents | Why it must persist |
+|---|---|---|
+| `.storage/sendspin.identity` | The server's **X25519 private key** | The public half *is* the `server_id` peers see. Regenerating it makes Home Assistant look like a brand new server to every speaker it has ever paired with. |
+| `.storage/sendspin.pairings.json` | Pairing records (**PSKs**) | Written by aiosendspin's own `FileServerPairingStore`, which does all its file I/O off the event loop. |
+| `.storage/sendspin.players` | Per-speaker names, last client id, last dial URL | Keeps a speaker's good name while it is offline — which is exactly when the name stops being visible on the network. |
+
+The adopted-speaker set itself is not a data store: it is config subentries, so
+it is the user's consent record rather than integration state.
 
 ---
 
@@ -166,9 +194,17 @@ repo layout; pytest runs the test suite.
 
 ## 7. Security Considerations
 
-- **LAN-local, unauthenticated.** Sendspin control traffic is local; the
-  integration inherits whatever the Sendspin spec provides. No credentials are
-  currently stored in the config entry.
+- **Secrets at rest.** An X25519 private key and pairing PSKs are written to
+  `.storage` in plaintext, as with all Home Assistant storage. They are covered
+  by HA backups, which is desirable — losing the key invalidates every pairing
+  — and means a backup carries them.
+- **LAN-local, unauthenticated.** Sendspin control traffic is cleartext `ws://`;
+  there is no TLS at any protocol version. The integration runs its server with
+  `allow_unencrypted=True`, without which no device currently on a typical
+  network can connect at all.
+- **The Plum mesh API has no authentication whatsoever**, and requests without
+  an `Origin` header bypass its CORS policy entirely. Anything on the LAN can
+  reroute audio. That is a property of that API, not a choice made here.
 - **Identity is not authentication.** The listener URL is used as a stable
   identity key, not as a trust boundary. Anything on the LAN that can reach the
   listener can control it — this is a property of the protocol, not of this
@@ -199,7 +235,7 @@ repo layout; pytest runs the test suite.
 ## 10. Project Identification
 
 - **Project Name**: HA-Sendspin (integration domain: `sendspin`)
-- **Repository URL**: [TODO — org and repo name undecided]
+- **Repository URL**: <https://github.com/AnotherMike-exe/HA-Sendspin> (MIT)
 - **Primary Contact**: Plum Solutions
 - **Date of Last Update**: 2026-08-11
 
@@ -209,13 +245,15 @@ repo layout; pytest runs the test suite.
 
 - **Sendspin**: synchronised multi-room audio protocol. Spec:
   <https://www.sendspin-audio.com/spec/>
-- **Controller / client role**: the Sendspin role that *directs* playback, as
-  opposed to the player role that renders audio. This project implements the
-  former only.
+- **Controller / client role**: the Sendspin role that *directs* playback. This
+  project does **not** implement it — no server on a pre-8.0 network will accept
+  it (OPEN-QUESTIONS §7). It hosts a source-less **server** instead.
+- **Frozen URL / dial URL**: the endpoint's permanent identity versus where it
+  answers today. Kept strictly apart so DHCP cannot orphan an entity.
 - **Listener URL**: a Sendspin server's addressable endpoint. Used here as the
   stable entity identity key.
-- **Roam**: moving a player from one Sendspin server to another. Reconnect-based;
-  distinct from intra-server group membership changes.
+- **Roam**: moving a player between servers. Not a distinct operation in this
+  integration — it is simply selecting a source that lives on another unit.
 - **HACS**: Home Assistant Community Store — distribution channel for custom
   integrations.
 - **hassfest**: Home Assistant's manifest/structure validator.

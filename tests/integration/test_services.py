@@ -216,3 +216,45 @@ async def test_targeting_an_unknown_device_is_a_clear_error(
             {"device_id": "does-not-exist"},
             blocking=True,
         )
+
+
+# --- Device removal and diagnostics ----------------------------------------
+
+
+async def test_deleting_a_device_drops_the_adoption(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Removing a speaker from the UI must actually un-adopt it.
+
+    Leaving the subentry behind would have the next reload re-dial the speaker
+    and re-create the device the user just deleted.
+    """
+    from custom_components.sendspin import async_remove_config_entry_device
+
+    entry = await setup_hub(hass, fake_server, adopted=True)
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
+
+    assert await async_remove_config_entry_device(hass, entry, device) is True
+    await hass.async_block_till_done()
+
+    assert entry.subentries == {}
+
+
+async def test_diagnostics_never_leak_the_private_key(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The identity's private half must not appear anywhere in the dump."""
+    from custom_components.sendspin.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    entry = await setup_hub(hass, fake_server, adopted=True)
+    identity = entry.runtime_data.host.identity
+
+    dump = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert identity.private_b64u not in str(dump)
+    # The public server id is fine — every speaker on the network sees it.
+    assert dump["server"]["server_id"] == identity.peer_id
+    assert dump["server"]["advertises_mdns"] is False
+    assert [e["frozen_url"] for e in dump["endpoints"]] == [PLAYER_URL]

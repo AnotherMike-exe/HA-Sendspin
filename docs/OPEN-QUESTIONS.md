@@ -1,15 +1,19 @@
 # Open Questions
 
-Unresolved design questions carried over from the original project outline
-(`_resources/Notes/sendspin-ha-integration-outline.md`). These are **blockers on
-design, not code TODOs** — each one changes the shape of the integration
-depending on how it resolves. Resolve before the surface they touch is built.
+Design questions that change the *shape* of the integration, not code TODOs.
+Started from the original project outline
+(`_resources/Notes/sendspin-ha-integration-outline.md`); §7 records what the
+hardware actually did, which resolved several of them and opened one new
+blocker.
 
 Status legend: 🔴 blocking · 🟡 needs a design pass · 🟢 decided
 
+**Read §7 first.** It is the only section describing observed behaviour rather
+than intent, and it contains the item that currently blocks metadata entirely.
+
 ---
 
-## 1. Multi-server arbitration — 🔴 blocking
+## 1. Multi-server arbitration — 🟢 resolved as policy, not as protocol
 
 **Question**: When a player could be claimed by more than one Sendspin server,
 who wins?
@@ -23,12 +27,22 @@ on the LAN.
 **Why it blocks**: `roam_player` has no defined correct behaviour until this is
 settled. Shipping a service that races two servers is worse than not shipping it.
 
-**Options not yet evaluated**: last-writer-wins; integration-side lock keyed on
-player; refuse to roam a player that another known server currently claims.
+**Resolved by refusing to participate.** The spec gap is untouched — it is not
+ours to close — but the integration no longer has undefined behaviour:
+
+- Adoption dials with `ConnectionReason.DISCOVERY`, never `PLAYBACK`. Home
+  Assistant has no audio to justify asserting a claim.
+- A discovered speaker is **never** adopted automatically.
+- A `GoodbyeReason.ANOTHER_SERVER` ends the dial and surfaces "another server
+  holds this", instead of retrying into a tug-of-war.
+- `sendspin.reclaim_player` is the explicit override, which the user asks for.
+
+Confirmed live: politeness does **not** protect a contested speaker (§7). It
+only stops us making the contest worse.
 
 ---
 
-## 2. Entity identity — 🔴 blocking
+## 2. Entity identity — 🟢 decided
 
 **Question**: Which Sendspin device name should HA display, and what do entities
 key on?
@@ -43,12 +57,20 @@ Two sub-problems:
   `speaker-identity-gui` note in project memory. Keying entities on the client id
   orphans them on rename or reconnect.
 
-**Decided so far**: listener URL is the unique id. This is already reflected in
-`const.py` and `config_flow.py`. The *display name* question is still open.
+**Decided.** The unique id is the listener URL **as first seen, frozen** —
+`player:{frozen_url}` — with the live dial URL kept separately so DHCP cannot
+orphan an entity, and the mDNS instance name as a secondary matcher so a moved
+speaker updates its address instead of acquiring a second entity.
+
+The display-name question is closed too: **handshake name > `name` TXT > mDNS
+instance name > `host:port`**, persisted in `player_memo.py` and **never
+demoted** — a later mDNS-only sighting must not overwrite a handshake name,
+because the good name stops being visible exactly when the speaker goes
+offline. A later *handshake* may still update it, so a genuine rename lands.
 
 ---
 
-## 3. Scope of "routing" — 🟡 needs a design pass
+## 3. Scope of "routing" — 🟢 resolved, and smaller than the question assumed
 
 **Question**: Do intra-server re-route and cross-server roam share HA service
 semantics?
@@ -61,9 +83,17 @@ They do not, and assuming they do is the trap:
 | Liveness | live | player drops and re-attaches |
 | Gotcha | group membership is fixed at `start_stream()` — **a player added to a live group joins silent** unless the stream is refreshed. Plum-Audio had to add this behaviour explicitly. | subject to §1 arbitration |
 
-**Reflected in the scaffold**: `services.yaml` deliberately declares
-`group_add_player` / `group_remove_player` separately from `roam_player`. Do not
-collapse them.
+**Resolved: neither is a service.** Routing is `media_player.select_source` on
+the speaker entity. Several speakers on one source *is* the group — Sendspin's
+own semantics — so no grouping feature is advertised, and roam is not a distinct
+operation but simply selecting a source that lives on another unit.
+
+All three scaffolded services are retired. What remains is the adoption
+lifecycle: `adopt_player`, `release_player`, `reclaim_player`.
+
+The membership window (`stop_stream` → mutate → settle → `start_stream`) is
+still required wherever *we* own a live stream — but a source-less server never
+does, so it is unbuilt and unneeded for now.
 
 ---
 
@@ -82,17 +112,10 @@ replacement.
 
 ---
 
-## 5. Repo location, name, and license — 🔴 blocking release
+## 5. Repo location, name, and license — 🟢 decided
 
-Not yet decided:
-
-- Whether this lives under the same GitHub org as Plum-Audio.
-- Final repo name (scaffolded as `HA-Sendspin`, domain `sendspin`).
-- License.
-
-**Why it blocks**: `manifest.json` requires `documentation`, `issue_tracker`, and
-`codeowners`, all currently `TODO-ORG` / `TODO-GITHUB-USERNAME` placeholders.
-hassfest and the HACS action will fail until these are real URLs.
+<https://github.com/AnotherMike-exe/HA-Sendspin>, domain `sendspin`, MIT.
+hassfest and the HACS action both pass.
 
 ---
 

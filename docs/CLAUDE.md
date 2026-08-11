@@ -10,15 +10,21 @@ that discovers and controls Sendspin servers and players on the LAN, generically
 and independently of Music Assistant.
 
 ### Key Features
-- **Discovery** — Sendspin servers/players found via mDNS, using HA core's
-  `zeroconf` integration (declared in `manifest.json`).
-- **Media player entities** — one per active stream/group: source, transport
-  controls, metadata and artwork via the Sendspin metadata role.
-- **Routing services** — add/remove a player to/from a group; roam a player
-  between servers.
-- **Availability as a first-class signal** — server/player presence maps onto
-  entity availability, so automations trigger on a stream coming online or a
-  player dropping off the mesh natively, with no polling script.
+- **Discovery** — Sendspin servers *and* players found via mDNS, using HA
+  core's `zeroconf` integration (two service types, declared in
+  `manifest.json`).
+- **One `media_player` per physical speaker** — durable, adopted with explicit
+  consent. Volume, mute and presence.
+- **Streams as a source dropdown** — available streams populate each speaker's
+  `source_list`; `select_source` is the routing verb. Nothing is created or
+  destroyed in the entity registry when a stream starts or stops.
+- **Availability as a first-class signal** — speaker presence maps onto entity
+  availability, so automations trigger on a player dropping off the mesh
+  natively, with no polling script.
+
+**Not yet delivered**: metadata, artwork, progress and transport. See
+`docs/OPEN-QUESTIONS.md` §7 — no server on a pre-8.0 network can accept our
+controller client.
 
 ### Why this exists
 Music Assistant already provides discovery, `media_player` entities, and
@@ -65,29 +71,49 @@ project's problem to track, not MA's.
 
 These encode traps this project **will** hit. They are not style preferences.
 
-1. **Key entities on the listener URL, never the client id.** A Sendspin client's
-   id is not stable across the two identity views. Keying on it orphans entities
-   on rename or reconnect. Plum-Audio hit this directly.
-2. **Intra-server re-route and cross-server roam are different operations.** Do
-   not collapse them into one service. Group membership is fixed at
-   `start_stream()` — a player added to a live group **joins silent** unless the
-   stream is refreshed. Roam is reconnect-based and is subject to the unresolved
-   multi-server arbitration gap.
-3. **Controller role only.** This integration never renders audio and never
-   *advertises* over mDNS — it only browses. Plum-Audio's `mesh/avahi.py` also
-   advertises; it is a reference, not code to copy.
-4. **The manifest `zeroconf` service type and `const.ZEROCONF_SERVICE_TYPE` must
-   stay in sync.** They are duplicated by necessity.
-5. **Read `docs/OPEN-QUESTIONS.md` before building routing or identity code.**
-   Two items there are marked blocking.
+1. **Key entities on the listener URL as FIRST SEEN, never the client id.** A
+   client's id is a MAC in the handshake view and an mDNS instance name in the
+   discovery view; the URL is the only field both share. The **frozen URL** is
+   the identity and is never recomputed; the **dial URL** is where the speaker
+   answers now and moves with DHCP. Conflating them orphans entities on a lease
+   change and discards the user's names, areas and icons.
+2. **Routing is `media_player.select_source`, not a service.** Several
+   speakers on one source *is* the group — Sendspin's own semantics — so no
+   grouping feature is advertised and `roam` is not a distinct operation. The
+   three services are the adoption lifecycle only: adopt, release, reclaim.
+   **No service takes a `player_id`**; they target HA devices, and the only raw
+   identifier accepted anywhere is the listener URL.
+3. **Server role, source-less.** HA hosts an in-process `SendspinServer` as
+   the routing authority, because a controller-role *client* cannot enumerate
+   groups, list players, or move a player between groups — that surface does
+   not exist on the wire. But this server **originates no audio** (never calls
+   `start_stream()`, so no `PushStream` is ever created) and **never advertises
+   over mDNS** (never calls `start_server()`, so no `AsyncZeroconf` is
+   constructed and nothing binds 5353). It also never listens: Sendspin servers
+   dial players, so HA is always the dialer.
+4. **Two zeroconf service types, duplicated by necessity.** Servers advertise
+   `_sendspin-server._tcp` (8927); players advertise `_sendspin._tcp` (8928).
+   `manifest.json` and `const.py` must stay in sync, as must the runtime
+   requirements mirrored into `requirements-dev.txt`.
+5. **Never auto-dial a discovered speaker.** Adoption takes it from whatever
+   holds it, and a player always yields to the newest dialer *regardless of
+   connection reason* — observed live against Music Assistant, using the polite
+   `DISCOVERY` reason. Adoption is always an explicit, warned user action, and a
+   `GoodbyeReason.ANOTHER_SERVER` must end the dial rather than start a
+   tug-of-war.
+6. **Read `docs/OPEN-QUESTIONS.md` before building routing, identity or
+   metadata code.** §7 records what the hardware actually did, including the
+   one item that currently blocks metadata entirely.
 
 ---
 
 ## Technology Stack
 
-- **Language**: Python 3.13 (match the HA release being targeted)
+- **Language**: Python 3.14 (HA 2026.8.1 requires >= 3.14.2)
 - **Platform**: Home Assistant custom integration (not an add-on — see below)
-- **Key dependency**: `aiosendspin` — Sendspin controller/client role
+- **Key dependency**: `aiosendspin==9.1.0` — Sendspin **server** role,
+  `allow_unencrypted=True`. Plus `numpy` and `pillow`, which are hard
+  import-time requirements of the server module and are NOT both shipped by HA.
 - **Distribution**: HACS
 - **Testing**: `pytest` + `pytest-homeassistant-custom-component`
 - **Lint/format**: `ruff`
