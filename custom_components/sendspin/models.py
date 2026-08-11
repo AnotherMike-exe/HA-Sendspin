@@ -2,23 +2,66 @@
 
 Exists to break the import cycle that otherwise forms between the config entry
 setup, the server host, the coordinator and the entity platforms.
+
+Two URL kinds appear throughout and are never interchangeable:
+
+- **frozen_url** — the endpoint's identity, as first seen. Entity unique ids are
+  built from it and it is never recomputed.
+- **dial_url** — where the speaker answers *now*. Moves with DHCP.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .coordinator import SendspinCoordinator
+    from .player_memo import PlayerMemo
     from .server_host import ServerHost
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointSnapshot:
+    """One adopted Sendspin endpoint, as of the last server event."""
+
+    frozen_url: str
+    dial_url: str
+    name: str
+
+    client_id: str | None = None
+    connected: bool = False
+
+    yielded_reason: str | None = None
+    """Set when another server holds this speaker, or it needs pairing. The
+    adoption still stands; we have simply stopped fighting for it."""
+
+    volume: int | None = None
+    """0-100, or None when the player has never reported one.
+
+    None must surface as *no volume attribute*, never as a fabricated level. A
+    server can command a player's volume but cannot read it back unless the
+    player echoes `client/state`, and many do not. Inventing a value here makes
+    every level read 100% while the audio is demonstrably quieter, which looks
+    exactly like a UI bug and is not one."""
+
+    muted: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SendspinData:
+    """Everything the entities render, rebuilt on each server event."""
+
+    endpoints: dict[str, EndpointSnapshot] = field(default_factory=dict)
+    """Keyed on frozen_url. Contains every **adopted** endpoint, whether or not
+    it is currently connected — a speaker that drops off must go unavailable,
+    not vanish."""
 
 
 @dataclass(slots=True)
 class SendspinRuntimeData:
-    """Everything a Sendspin config entry owns while it is loaded.
-
-    Stored on `entry.runtime_data`. Grows in M2 with the coordinator and the
-    adopted-player registry.
-    """
+    """Everything a Sendspin config entry owns while it is loaded."""
 
     host: ServerHost
+    coordinator: SendspinCoordinator
+    memo: PlayerMemo

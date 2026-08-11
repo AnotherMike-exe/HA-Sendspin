@@ -39,9 +39,17 @@ WEBSOCKET_SCHEME: Final = "ws"
 # secondary matcher that lets a moved device update its dial URL instead of
 # orphaning the entity. See docs/OPEN-QUESTIONS.md §2.
 CONF_LISTENER_URL: Final = "listener_url"
+"""The FROZEN url — the endpoint's identity, as first seen. Never recomputed."""
 CONF_DIAL_URL: Final = "dial_url"
 CONF_MDNS_INSTANCE_NAME: Final = "mdns_instance_name"
 CONF_SERVER_NAME: Final = "server_name"
+
+# --- Config subentries -----------------------------------------------------
+# Adopted speakers and attached servers are subentries of the single hub entry,
+# so each gets a device, a native rename and a native delete, and adoption has
+# an "Add device" affordance without a custom service.
+SUBENTRY_TYPE_PLAYER: Final = "player"
+SUBENTRY_TYPE_SERVER: Final = "server"
 
 # --- Services --------------------------------------------------------------
 # Routing is NOT a service: it is media_player.select_source on the endpoint

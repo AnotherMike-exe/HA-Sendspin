@@ -4,9 +4,6 @@ Home Assistant hosts a source-less Sendspin server so it can adopt and route
 generic Sendspin endpoints without any additional hardware on the network. It
 never renders audio and never advertises itself over mDNS. See
 `server_host.py` for why a controller-role client cannot do this job.
-
-M1 scope: the config entry brings up the identity and the server. Discovery,
-adoption and entities arrive in M2, so no platforms are forwarded yet.
 """
 
 from __future__ import annotations
@@ -18,14 +15,16 @@ from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
+from .const import CONF_LISTENER_URL, SUBENTRY_TYPE_PLAYER
+from .coordinator import SendspinCoordinator
 from .identity import async_load_identity, async_load_pairing_store
 from .models import SendspinRuntimeData
+from .player_memo import PlayerMemo
 from .server_host import async_create_server_host
 
 _LOGGER = logging.getLogger(__name__)
 
-# Populated in M2, when there is something to put on them.
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.MEDIA_PLAYER]
 
 type SendspinConfigEntry = ConfigEntry[SendspinRuntimeData]
 
@@ -34,6 +33,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
     """Set up Sendspin from a config entry."""
     identity = await async_load_identity(hass)
     pairing_store = await async_load_pairing_store(hass)
+
+    memo = PlayerMemo(hass)
+    await memo.async_load()
 
     try:
         host = await async_create_server_host(
@@ -48,19 +50,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
         ) from err
 
     _LOGGER.debug("Sendspin server ready with server_id %s", host.server_id)
-    entry.runtime_data = SendspinRuntimeData(host=host)
 
+    coordinator = SendspinCoordinator(hass, entry, host, memo)
+    coordinator.async_start()
+    entry.runtime_data = SendspinRuntimeData(
+        host=host, coordinator=coordinator, memo=memo
+    )
+
+    await _async_restore_adoptions(entry, host, coordinator, memo)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_restore_adoptions(
+    entry: SendspinConfigEntry,
+    host: object,
+    coordinator: SendspinCoordinator,
+    memo: PlayerMemo,
+) -> None:
+    """Re-adopt every speaker the user has previously consented to.
+
+    Each adopted speaker is a config subentry, so the set survives restarts
+    without the integration ever adopting anything the user did not ask for.
+    """
+    for subentry in entry.subentries.values():
+        if subentry.subentry_type != SUBENTRY_TYPE_PLAYER:
+            continue
+        frozen_url = subentry.data[CONF_LISTENER_URL]
+        coordinator.async_track_endpoint(frozen_url)
+        await host.async_adopt(memo.dial_url(frozen_url))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> bool:
     """Unload a config entry.
 
-    The server is closed *after* the platforms unload but regardless of whether
-    they did: leaving dial tasks running would mean a reload races the new
-    entry's dialers for the same speakers.
+    The coordinator stops listening before the server closes, and the server is
+    closed regardless of whether the platforms unloaded cleanly: leaving dial
+    tasks running would mean a reload races the new entry's dialers for the
+    same speakers.
     """
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    await entry.runtime_data.host.async_close()
+    runtime = entry.runtime_data
+    runtime.coordinator.async_stop()
+    await runtime.host.async_close()
+    await runtime.memo.async_save()
     return unloaded

@@ -87,6 +87,21 @@ _NON_RETRYABLE_GOODBYES: frozenset[GoodbyeReason] = frozenset(
 )
 
 
+def player_role(client: object) -> object | None:
+    """Return a client's player role, or None if it has none.
+
+    Volume and mute live on the role, not on the client. Looked up by *family*
+    rather than by the exact `player@v1` id so a future `player@v2` still
+    resolves.
+
+    Note `get_player_volume()` returns `int | None`: a server can command a
+    player's volume but cannot read it back unless the player echoes
+    `client/state`, and many do not.
+    """
+    roles = client.roles_by_family("player")
+    return roles[0] if roles else None
+
+
 async def async_create_server_host(
     hass: HomeAssistant,
     *,

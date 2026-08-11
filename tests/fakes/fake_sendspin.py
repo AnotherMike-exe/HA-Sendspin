@@ -35,6 +35,55 @@ class DialCall:
     retry_indefinitely: bool
 
 
+class FakePlayerRole:
+    """A player role, which is where volume and mute actually live."""
+
+    def __init__(self, volume: int | None = None, muted: bool | None = None) -> None:
+        """Volume defaults to None: unknown, not zero, and not 100."""
+        self._volume = volume
+        self._muted = muted
+        self.commanded_volumes: list[int] = []
+        self.commanded_mutes: list[bool] = []
+
+    def get_player_volume(self) -> int | None:
+        """None when the player has never echoed client/state."""
+        return self._volume
+
+    def get_player_muted(self) -> bool | None:
+        """None when the player has never echoed client/state."""
+        return self._muted
+
+    def set_player_volume(self, volume: int) -> None:
+        """Command volume. A server can set but not necessarily read it back."""
+        self.commanded_volumes.append(volume)
+
+    def set_player_mute(self, muted: bool) -> None:
+        """Command mute."""
+        self.commanded_mutes.append(muted)
+
+
+class FakeSendspinClient:
+    """A connected speaker as the server sees it."""
+
+    def __init__(
+        self,
+        client_id: str,
+        name: str,
+        *,
+        is_connected: bool = True,
+        role: FakePlayerRole | None = None,
+    ) -> None:
+        """Create the fake client."""
+        self.client_id = client_id
+        self.name = name
+        self.is_connected = is_connected
+        self.player = role if role is not None else FakePlayerRole()
+
+    def roles_by_family(self, family: str) -> list[FakePlayerRole]:
+        """Only the player family is modelled."""
+        return [self.player] if family == "player" else []
+
+
 class FakeSendspinServer:
     """Duck-typed `SendspinServer` covering the surface `ServerHost` uses."""
 
@@ -53,7 +102,33 @@ class FakeSendspinServer:
         self.disconnect_calls: list[str] = []
         self.reclaim_calls: list[tuple[str, float]] = []
         self.client_ids_by_url: dict[str, str] = {}
+        self.clients_by_id: dict[str, FakeSendspinClient] = {}
         self.closed = False
+
+    def attach(
+        self,
+        url: str,
+        client_id: str,
+        name: str = "Speaker",
+        *,
+        volume: int | None = None,
+        muted: bool | None = None,
+        is_connected: bool = True,
+    ) -> FakeSendspinClient:
+        """Register a client answering on a URL, as if it had connected."""
+        client = FakeSendspinClient(
+            client_id,
+            name,
+            is_connected=is_connected,
+            role=FakePlayerRole(volume=volume, muted=muted),
+        )
+        self.client_ids_by_url[url] = client_id
+        self.clients_by_id[client_id] = client
+        return client
+
+    def get_client(self, client_id: str) -> FakeSendspinClient | None:
+        """Look a client up by id."""
+        return self.clients_by_id.get(client_id)
 
     def add_event_listener(
         self, callback: Callable[[object, object], None]
