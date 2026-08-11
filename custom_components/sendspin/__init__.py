@@ -59,7 +59,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
 
     await _async_restore_adoptions(entry, host, coordinator, memo)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     return True
+
+
+async def _async_entry_updated(hass: HomeAssistant, entry: SendspinConfigEntry) -> None:
+    """Reload when the user adopts or removes a speaker.
+
+    Adoption changes which speakers we dial and which entities exist. Reloading
+    is blunt but keeps a single code path for bringing an adoption up, so a
+    speaker added at runtime is set up exactly as one restored at startup.
+    """
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def _async_restore_adoptions(

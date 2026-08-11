@@ -3,7 +3,17 @@
     "step": {
       "user": {
         "title": "Set up Sendspin",
-        "description": "Home Assistant will act as a Sendspin server so it can adopt and route Sendspin speakers on your network. It does not play audio itself and does not advertise itself over mDNS.",
+        "description": "Home Assistant will act as a Sendspin server so it can adopt and control Sendspin speakers on your network. It does not play audio itself and does not advertise itself over mDNS.",
+        "data": {
+          "name": "Server name"
+        },
+        "data_description": {
+          "name": "The name speakers see when Home Assistant connects to them."
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Sendspin found on your network",
+        "description": "Home Assistant found {name}. Setting Sendspin up lets you adopt and control Sendspin speakers. No speaker is adopted until you choose one — adopting takes a speaker away from whatever is currently using it.",
         "data": {
           "name": "Server name"
         },
@@ -13,11 +23,39 @@
       }
     },
     "abort": {
-      "single_instance_allowed": "Already configured. Only a single Sendspin configuration is allowed."
+      "single_instance_allowed": "Already configured. Only a single Sendspin configuration is allowed.",
+      "not_sendspin": "This device does not look like a Sendspin server or player."
     },
     "error": {
       "cannot_connect": "Failed to connect",
       "unknown": "Unexpected error"
+    }
+  },
+  "config_subentries": {
+    "player": {
+      "title": "Adopt a Sendspin speaker",
+      "initiate_flow": {
+        "user": "Adopt a speaker"
+      },
+      "entry_type": "Speaker",
+      "step": {
+        "user": {
+          "title": "Adopt a Sendspin speaker",
+          "description": "Adopting a speaker makes Home Assistant its Sendspin server. If Music Assistant or another Sendspin server is currently using it, that server will lose it, and it may take it straight back. Home Assistant cannot play audio to a speaker in this version — adopting gives you volume, mute and presence.\n\nSeen on your network: {discovered}",
+          "data": {
+            "listener_url": "Speaker address"
+          },
+          "data_description": {
+            "listener_url": "The speaker's Sendspin address, for example ws://192.168.1.50:8928/sendspin"
+          }
+        }
+      },
+      "abort": {
+        "already_configured": "Device is already configured"
+      },
+      "error": {
+        "invalid_url": "That is not a valid Sendspin address. It should look like ws://192.168.1.50:8928/sendspin"
+      }
     }
   }
 }
