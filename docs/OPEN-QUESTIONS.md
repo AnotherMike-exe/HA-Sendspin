@@ -180,6 +180,56 @@ Confirms `UPSTREAM-AIOSENDSPIN.md` §1. The fleet works only because
 happens when upstream tightens that default, alongside the existing question
 about `allow_unencrypted` being removed from transition mode.
 
+### 🔴 The controller link cannot reach any server on the network
+
+Probed with a controller-role `SendspinClient` from aiosendspin 9.1.0. All three
+servers reject it identically:
+
+```
+HandshakeAbortedError: expected server/init (TEXT), got CLOSE
+```
+
+| Server | Result |
+|---|---|
+| Music Assistant, `192.168.7.226:8927` | ❌ |
+| Plum Amp100, `192.168.7.204:8927` | ❌ |
+| Plum RackPi, `192.168.7.122:8927` | ❌ |
+
+Every one predates 8.0. A 9.1.0 client always initiates the Noise handshake and
+has **no client-side `allow_unencrypted`** — that flag exists only on the
+server. So the client cannot downgrade, and the connection dies before
+`client/hello`.
+
+**This is an asymmetry, not a version mistake.** The same 9.1.0 package is fine
+as a *server*: `allow_unencrypted=True` accepts these very devices, proven on
+hardware above. It is only the *client* half that cannot talk to them. One
+installed version has to serve both roles, and none serves both against this
+fleet:
+
+| | server role | client role |
+|---|---|---|
+| **9.1.0** | ✅ accepts legacy cleartext | ❌ cannot dial legacy servers |
+| **6.0.5** | ✅ natively cleartext | ✅ |
+
+**What it blocks:** M5 only — metadata, artwork, progress and transport, which
+all require a controller socket joined to a playing group. **M4 is unaffected**:
+source listing and routing run over the mesh REST API on plain HTTP.
+
+**Options, none yet chosen:**
+
+1. **Hand-roll a minimal legacy controller client.** The pre-8.0 wire protocol
+   is plain JSON over a websocket — `client/hello` → `server/hello`, then
+   `group/update`, `server/state`, `client/command`, `client/time`. Plum-Audio's
+   `frontend/services/sendspinControllerClient.ts` is a working reference, and
+   `docs/SENDSPIN-CONTROLLER-PROTOCOL.md` documents it. Decouples the controller
+   role from the library version permanently, at the cost of owning a second
+   protocol implementation — which is the drift liability §6 already accepts.
+2. **Pin 6.0.5 for both roles.** Works against everything today. Forfeits
+   forward compatibility with Noise-era clients, and means rewriting
+   `identity.py` and the server construction, since 6.0.5 has no `Identity` and
+   no pairing store.
+3. **Defer metadata.** Ship M4 without it and revisit when the servers upgrade.
+
 ### Sources are routinely all-idle
 
 Every source across `unit-7204` and `unit-7122` read `active=False,
