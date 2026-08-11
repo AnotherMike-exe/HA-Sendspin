@@ -3,7 +3,6 @@
   "name": "Sendspin",
   "codeowners": ["@AnotherMike-exe"],
   "config_flow": true,
-  "dependencies": ["http"],
   "documentation": "https://github.com/AnotherMike-exe/HA-Sendspin",
   "integration_type": "hub",
   "iot_class": "local_push",

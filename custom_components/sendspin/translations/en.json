@@ -2,61 +2,22 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect to a Sendspin server",
+        "title": "Set up Sendspin",
+        "description": "Home Assistant will act as a Sendspin server so it can adopt and route Sendspin speakers on your network. It does not play audio itself and does not advertise itself over mDNS.",
         "data": {
-          "listener_url": "Listener URL"
+          "name": "Server name"
         },
         "data_description": {
-          "listener_url": "The Sendspin server's listener URL. This is the stable identity the integration keys entities on."
+          "name": "The name speakers see when Home Assistant connects to them."
         }
-      },
-      "zeroconf_confirm": {
-        "title": "Sendspin server discovered",
-        "description": "Do you want to add the Sendspin server {name} to Home Assistant?"
       }
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "single_instance_allowed": "Already configured. Only a single Sendspin configuration is allowed."
     },
     "error": {
       "cannot_connect": "Failed to connect",
       "unknown": "Unexpected error"
-    }
-  },
-  "services": {
-    "group_add_player": {
-      "name": "Add player to group",
-      "description": "Adds a Sendspin player to the group backing this stream.",
-      "fields": {
-        "player_id": {
-          "name": "Player",
-          "description": "The Sendspin player to add."
-        }
-      }
-    },
-    "group_remove_player": {
-      "name": "Remove player from group",
-      "description": "Removes a Sendspin player from the group backing this stream.",
-      "fields": {
-        "player_id": {
-          "name": "Player",
-          "description": "The Sendspin player to remove."
-        }
-      }
-    },
-    "roam_player": {
-      "name": "Roam player to another server",
-      "description": "Moves a Sendspin player to a different server. This is a reconnect-based operation and is not the same as adding a player to a group on the current server.",
-      "fields": {
-        "player_id": {
-          "name": "Player",
-          "description": "The Sendspin player to move."
-        },
-        "target_server": {
-          "name": "Target server",
-          "description": "The Sendspin server that should claim the player."
-        }
-      }
     }
   }
 }

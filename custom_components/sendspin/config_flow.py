@@ -1,11 +1,14 @@
 """Config flow for the Sendspin integration.
 
-Two entry paths:
-  - `async_step_user`     — manual entry of a server listener URL.
-  - `async_step_zeroconf` — triggered by HA core when a Sendspin server is seen
-                            on the LAN, per the `zeroconf` key in manifest.json.
+A config entry represents **Home Assistant's own Sendspin server**, not a
+remote one. There is exactly one, because there is one identity and one set of
+adopted speakers; discovered players and attached servers become subentries of
+it in M2 rather than entries of their own.
 
-Scaffold status: structure only. No steps are implemented.
+M1 scope: the manual step that brings the hub into existence. The zeroconf
+branches for `_sendspin-server._tcp` and `_sendspin._tcp` land in M2, together
+with the adoption consent step — a discovered speaker must never be adopted
+automatically, because dialling one takes it from whatever currently holds it.
 """
 
 from __future__ import annotations
@@ -13,9 +16,15 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+from homeassistant.const import CONF_NAME
+from homeassistant.helpers import config_validation as cv
+import voluptuous as vol
 
 from .const import DOMAIN
+
+# The hub is a singleton, so its unique id is a constant rather than derived
+# from anything on the network.
+HUB_UNIQUE_ID = "hub"
 
 
 class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -26,25 +35,32 @@ class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Handle a manually initiated flow.
+        """Create the Sendspin hub.
 
-        TODO: prompt for the listener URL, probe it with aiosendspin, and set
-        the unique id to the listener URL (see docs/OPEN-QUESTIONS.md §2 for
-        why the client id is unsuitable as a unique id).
+        The only thing to ask for is the name speakers will see this server
+        advertise itself as during the handshake. It defaults to the Home
+        Assistant instance name, which is almost always what a user wants.
         """
-        raise NotImplementedError
+        # Enforced here rather than via the manifest's `single_config_entry`,
+        # which would also auto-abort zeroconf discovery flows — and M2 needs
+        # those to reach the adoption step.
+        if self._async_current_entries():
+            return self.async_abort(reason="single_instance_allowed")
 
-    async def async_step_zeroconf(
-        self, discovery_info: ZeroconfServiceInfo
-    ) -> ConfigFlowResult:
-        """Handle discovery via zeroconf.
+        if user_input is not None:
+            await self.async_set_unique_id(HUB_UNIQUE_ID)
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title=user_input[CONF_NAME], data={CONF_NAME: user_input[CONF_NAME]}
+            )
 
-        TODO:
-          - Build the listener URL from discovery_info host/port/properties.
-          - `await self.async_set_unique_id(listener_url)` then
-            `self._abort_if_unique_id_configured(updates=...)` so a server that
-            changes IP updates the existing entry instead of duplicating it.
-          - Decide which name to surface: the mDNS instance name or the
-            handshake name. These differ. See docs/OPEN-QUESTIONS.md §2.
-        """
-        raise NotImplementedError
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_NAME, default=self.hass.config.location_name
+                    ): cv.string
+                }
+            ),
+        )
