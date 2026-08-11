@@ -19,6 +19,7 @@ Reproduced here, all verified against aiosendspin 9.1.0:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from aiosendspin.models.types import ConnectionReason
@@ -46,12 +47,35 @@ class FakeSendspinServer:
         """
         self._connection_tasks: dict[str, asyncio.Task] = {}
         self._stubborn_cancels = stubborn_cancels
+        self._listeners: list[Callable[[object, object], None]] = []
         self.dial_calls: list[DialCall] = []
         self.dials_started: list[str] = []
         self.disconnect_calls: list[str] = []
         self.reclaim_calls: list[tuple[str, float]] = []
         self.client_ids_by_url: dict[str, str] = {}
         self.closed = False
+
+    def add_event_listener(
+        self, callback: Callable[[object, object], None]
+    ) -> Callable[[], None]:
+        """Register an event listener, returning an unsubscribe callable."""
+        self._listeners.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
+        return _unsubscribe
+
+    def emit(self, event: object) -> None:
+        """Fire an event at every listener, as the real server does."""
+        for callback in list(self._listeners):
+            callback(self, event)
+
+    @property
+    def listener_count(self) -> int:
+        """How many listeners are attached — used to prove teardown unhooks."""
+        return len(self._listeners)
 
     # --- the surface ServerHost depends on --------------------------------
 
@@ -96,6 +120,13 @@ class FakeSendspinServer:
     def get_client_id_for_url(self, url: str) -> str | None:
         """Resolve a dial URL to the client answering on it."""
         return self.client_ids_by_url.get(url)
+
+    def get_client_url(self, client_id: str) -> str | None:
+        """Reverse of `get_client_id_for_url`."""
+        for url, cid in self.client_ids_by_url.items():
+            if cid == client_id:
+                return url
+        return None
 
     async def close(self) -> None:
         """Shut the server down."""

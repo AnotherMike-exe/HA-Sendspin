@@ -8,8 +8,9 @@ reason.
 
 from __future__ import annotations
 
-from aiosendspin.models.types import ConnectionReason
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason
 from aiosendspin.noise.keys import Identity
+from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEvent
 from homeassistant.core import HomeAssistant
 import pytest
 
@@ -153,3 +154,154 @@ async def test_reclaim_asserts_a_playback_claim(
 
     assert await host.async_reclaim("98:A3:16:D0:9E:E8", timeout_s=5.0) is True
     assert server.reclaim_calls == [("98:A3:16:D0:9E:E8", 5.0)]
+
+
+# --- Yielding to another server --------------------------------------------
+#
+# Observed on hardware (docs/OPEN-QUESTIONS.md §7): dialling the Satellite1
+# completed a handshake, then got GoodbyeReason.ANOTHER_SERVER and never
+# recovered across 30s of retries, because Music Assistant re-dials harder.
+# Two servers retrying at each other degrades both.
+
+CLIENT_ID = "98:A3:16:D0:9E:E8"
+
+
+async def adopt_and_connect(
+    host: ServerHost, server: FakeSendspinServer, url: str = PLAYER_URL
+) -> None:
+    """Adopt a URL and let the host see the client connect on it."""
+    server.client_ids_by_url[url] = CLIENT_ID
+    await host.async_adopt(url)
+    server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+
+
+async def test_another_server_goodbye_stops_the_dial(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """Losing a speaker to another server must end the tug-of-war."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+
+    server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await hass.async_block_till_done()
+
+    assert server.live_dial_urls == set()
+    # Still adopted: the user asked for it, and the entity should say why it
+    # is not held rather than silently disappearing.
+    assert PLAYER_URL in host.adopted_urls
+    assert host.yielded_urls == {PLAYER_URL: GoodbyeReason.ANOTHER_SERVER}
+
+
+async def test_a_transient_goodbye_keeps_retrying(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """A speaker rebooting must not be abandoned.
+
+    This is the other half of the rule: giving up on ANOTHER_SERVER is only
+    correct because we keep retrying everything else. A speaker that reboots
+    or drops off Wi-Fi has to come back on its own.
+    """
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+
+    server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.RESTART
+        )
+    )
+    await hass.async_block_till_done()
+
+    assert server.live_dial_urls == {PLAYER_URL}
+    assert host.yielded_urls == {}
+
+    await host.async_close()
+
+
+async def test_an_unattributed_disconnect_keeps_retrying(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """A dropped socket carries no goodbye reason at all — keep dialling."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+
+    server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+    await hass.async_block_till_done()
+
+    assert server.live_dial_urls == {PLAYER_URL}
+
+    await host.async_close()
+
+
+async def test_re_adopting_a_yielded_player_tries_again(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """Adopting a yielded URL is the user asking us to have another go."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+    server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await hass.async_block_till_done()
+    assert host.yielded_urls
+
+    await host.async_adopt(PLAYER_URL)
+
+    assert host.yielded_urls == {}
+    assert server.live_dial_urls == {PLAYER_URL}
+
+    await host.async_close()
+
+
+async def test_reconnecting_clears_the_yield(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """If we end up holding it after all, stop claiming we yielded it."""
+    host, server = make_host(hass, identity)
+    await adopt_and_connect(host, server)
+    server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await hass.async_block_till_done()
+
+    server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+
+    assert host.yielded_urls == {}
+
+    await host.async_close()
+
+
+async def test_a_goodbye_for_an_unadopted_player_is_ignored(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """Other servers' clients are none of our business."""
+    host, server = make_host(hass, identity)
+    server.client_ids_by_url[OTHER_URL] = "aa:bb:cc:dd:ee:ff"
+
+    server.emit(
+        ClientDisconnectedEvent(
+            client_id="aa:bb:cc:dd:ee:ff", goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await hass.async_block_till_done()
+
+    assert host.yielded_urls == {}
+
+
+async def test_close_unhooks_the_event_listener(
+    hass: HomeAssistant, identity: Identity
+) -> None:
+    """A reload must not leave the previous host reacting to events."""
+    host, server = make_host(hass, identity)
+    assert server.listener_count == 1
+
+    await host.async_close()
+
+    assert server.listener_count == 0

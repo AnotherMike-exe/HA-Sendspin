@@ -41,12 +41,19 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from aiosendspin.models.types import ConnectionReason
-from aiosendspin.server.server import SendspinServer
+from aiosendspin.models.types import ConnectionReason, GoodbyeReason
+from aiosendspin.server.server import (
+    ClientConnectedEvent,
+    ClientDisconnectedEvent,
+    SendspinEvent,
+    SendspinServer,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from aiosendspin.noise.keys import Identity
     from aiosendspin.noise.trust_store import ServerPairingStore
 
@@ -56,6 +63,28 @@ _LOGGER = logging.getLogger(__name__)
 # up and logging. Cancellation is normally immediate; this only bounds the
 # pathological case described in the module docstring.
 _DIAL_TEARDOWN_TIMEOUT_S = 5.0
+
+# Goodbye reasons where continuing to dial is actively harmful.
+#
+# ANOTHER_SERVER is the one observed on hardware: dialling the Satellite1
+# handshook, then got ANOTHER_SERVER and never recovered across 30s of retries,
+# because Music Assistant re-dials harder. Two servers retrying at each other
+# is a tug-of-war that degrades both. Politeness does not help — this happened
+# with ConnectionReason.DISCOVERY, not PLAYBACK. See docs/OPEN-QUESTIONS.md §7.
+#
+# The others are terminal without user action, so retrying only generates noise.
+#
+# Everything else — SHUTDOWN, RESTART, USER_REQUEST, CONCURRENT_ATTEMPT, or no
+# reason at all — is transient. A speaker rebooting or a flaky network must
+# keep being retried, which is the whole point of retry_indefinitely.
+_NON_RETRYABLE_GOODBYES: frozenset[GoodbyeReason] = frozenset(
+    {
+        GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.UNAUTHORIZED,
+        GoodbyeReason.PAIRING_REQUIRED,
+        GoodbyeReason.UNPAIRED,
+    }
+)
 
 
 async def async_create_server_host(
@@ -95,6 +124,11 @@ class ServerHost:
         self.server = server
         self.identity = identity
         self._adopted: set[str] = set()
+        self._yielded: dict[str, GoodbyeReason] = {}
+        self._url_by_client_id: dict[str, str] = {}
+        self._unsubscribe: Callable[[], None] | None = server.add_event_listener(
+            self._on_server_event
+        )
 
     @property
     def server_id(self) -> str:
@@ -105,6 +139,16 @@ class ServerHost:
     def adopted_urls(self) -> frozenset[str]:
         """Dial URLs this host is currently holding or trying to hold."""
         return frozenset(self._adopted)
+
+    @property
+    def yielded_urls(self) -> dict[str, GoodbyeReason]:
+        """Adopted URLs we have stopped dialling, and why.
+
+        These are still adopted — the user asked for them — but another server
+        holds them, or they need pairing. Surfacing this is the honest
+        alternative to retrying forever and losing quietly.
+        """
+        return dict(self._yielded)
 
     def client_id_for_url(self, dial_url: str) -> str | None:
         """Resolve a dial URL to the client id currently answering on it.
@@ -128,9 +172,13 @@ class ServerHost:
 
         Stops any existing dialer first, because `connect_to_client` is a
         silent no-op while one exists.
+
+        Calling this on a URL we previously yielded is the user asking us to
+        try again, so the yield is cleared.
         """
         await self._async_stop_dialing(dial_url)
         self._adopted.add(dial_url)
+        self._yielded.pop(dial_url, None)
         _LOGGER.debug("Adopting Sendspin player at %s", dial_url)
         self.server.connect_to_client(
             dial_url,
@@ -142,15 +190,21 @@ class ServerHost:
     async def async_release(self, dial_url: str) -> None:
         """Stop holding a player so another server can have it."""
         self._adopted.discard(dial_url)
+        self._yielded.pop(dial_url, None)
         _LOGGER.debug("Releasing Sendspin player at %s", dial_url)
         await self._async_stop_dialing(dial_url)
 
     async def async_reclaim(self, client_id: str, timeout_s: float = 30.0) -> bool:
         """Assert a playback claim on a player another server has taken.
 
+        This is the escalation from a yielded adoption: the user has been told
+        another server holds the speaker and has asked for it anyway.
+
         Synchronous upstream: it dials and arms a timeout, it does not wait for
         the player to land. Callers that need to know it arrived must poll.
         """
+        if (url := self._url_by_client_id.get(client_id)) is not None:
+            self._yielded.pop(url, None)
         return self.server.reclaim_client_for_playback(client_id, timeout_s=timeout_s)
 
     async def async_close(self) -> None:
@@ -160,10 +214,61 @@ class ServerHost:
         not leave a background task holding a websocket to a speaker that the
         reloaded entry then tries to dial again.
         """
+        if self._unsubscribe is not None:
+            self._unsubscribe()
+            self._unsubscribe = None
         for dial_url in list(self._adopted):
             await self._async_stop_dialing(dial_url)
         self._adopted.clear()
+        self._yielded.clear()
+        self._url_by_client_id.clear()
         await self.server.close()
+
+    def _on_server_event(self, _server: SendspinServer, event: SendspinEvent) -> None:
+        """React to server events. Called synchronously on the event loop."""
+        if isinstance(event, ClientConnectedEvent):
+            if (url := self._url_for_client_id(event.client_id)) is not None:
+                self._url_by_client_id[event.client_id] = url
+                # Whatever made us yield, we are clearly holding it now.
+                self._yielded.pop(url, None)
+            return
+
+        if not isinstance(event, ClientDisconnectedEvent):
+            return
+        if event.goodbye_reason not in _NON_RETRYABLE_GOODBYES:
+            return  # transient — let retry_indefinitely do its job
+        if (url := self._url_for_client_id(event.client_id)) is None:
+            return
+        if url not in self._adopted:
+            return
+
+        self._yielded[url] = event.goodbye_reason
+        _LOGGER.info(
+            "Sendspin player %s said goodbye (%s); giving up the dial rather "
+            "than fighting for it. Use the reclaim service to take it anyway",
+            url,
+            event.goodbye_reason.value,
+        )
+        self.hass.async_create_task(
+            self._async_stop_dialing(url), f"sendspin-stop-dial-{url}"
+        )
+
+    def _url_for_client_id(self, client_id: str) -> str | None:
+        """Map a client id back to the URL we dial it on.
+
+        Checked in order of reliability: what we recorded while connected, then
+        upstream's registry, then a scan of our own adoptions. The last two can
+        both come up empty once a client has fully disconnected, which is
+        precisely when we need the answer.
+        """
+        if (url := self._url_by_client_id.get(client_id)) is not None:
+            return url
+        if (url := self.server.get_client_url(client_id)) is not None:
+            return url
+        for candidate in self._adopted:
+            if self.server.get_client_id_for_url(candidate) == client_id:
+                return candidate
+        return None
 
     async def _async_stop_dialing(self, dial_url: str) -> None:
         """Stop a dial task and confirm it actually stopped.
