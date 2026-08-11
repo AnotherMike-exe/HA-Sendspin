@@ -10,7 +10,7 @@
   "issue_tracker": "https://github.com/AnotherMike-exe/HA-Sendspin/issues",
   "loggers": ["aiosendspin"],
   "quality_scale": "custom",
-  "requirements": ["aiosendspin==9.1.0"],
+  "requirements": ["aiosendspin==9.1.0", "numpy>=1.26.0", "pillow>=11.0.0"],
   "version": "0.1.0",
   "zeroconf": ["_sendspin-server._tcp.local.", "_sendspin._tcp.local."]
 }
