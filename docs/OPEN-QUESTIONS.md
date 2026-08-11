@@ -106,3 +106,85 @@ project tracks its own. Accepted going in.
 `docs/HARD-WON-LESSONS.md` in Plum-Audio catalogues the identity, membership, and
 idle-state traps — this project will hit them again independently and does not
 inherit the fixes.
+
+---
+
+## 7. Hardware findings — M1 gate, 2026-08-11
+
+Run against the live LAN with a source-less `aiosendspin==9.1.0` server and
+`allow_unencrypted=True`, dialling out from `ServerHost.async_adopt`.
+
+### ✅ The architecture's core assumption holds
+
+A 9.1.0 server **can dial out to a pre-8.0 cleartext client and complete a
+handshake**. Only the *inbound* legacy branch had been confirmed by reading
+source; the outbound path is the only one this integration uses, and it works:
+
+```
+WARNING Accepting unencrypted legacy connection (transition mode)
+DEBUG   Received client/hello: name='Plum Amp100', client_id='player-7204', version=1
+[event] ClientConnectedEvent(client_id='player-7204')
+```
+
+Adoption of `ws://192.168.7.204:8928/sendspin` held **continuously for 30s**,
+negotiating `player@v1, controller@v1, metadata@v1, visualizer@v1, artwork@v1`.
+Hosting a server is therefore available to the existing fleet.
+
+### A first dial against a held player is refused — retry is mandatory
+
+A single-shot dial (`retry_indefinitely=False`) completed the handshake and then
+lost the socket 1ms later. A Sendspin player refuses a second socket, drops its
+current server, and **expects the new one to retry**. With
+`retry_initial_connection=True, retry_indefinitely=True` — what `async_adopt`
+uses — the same dial succeeded and held. Do not "optimise" those flags away.
+
+Note this is *not* caused by the artwork role's `stream/start` on join, which
+upstream emits for every server regardless of whether a stream exists.
+
+### 🔴 Contested devices flap, and Music Assistant wins
+
+Dialling the Satellite1 (`ws://192.168.7.151:8928/sendspin`) completed the
+handshake, learned the name, and was then taken straight back:
+
+```
+[event] ClientConnectedEvent(client_id='98:A3:16:D0:9E:E8')
+[event] ClientDisconnectedEvent(client_id='98:A3:16:D0:9E:E8',
+                                goodbye_reason=GoodbyeReason.ANOTHER_SERVER)
+```
+
+It never reconnected across 30s of retries: Music Assistant re-dials harder.
+This is §1's arbitration gap, live — and it happened despite dialling with
+`ConnectionReason.DISCOVERY` rather than `PLAYBACK`, so **politeness does not
+protect a contested device**.
+
+**Design consequence:** a `GoodbyeReason.ANOTHER_SERVER` goodbye must stop the
+retry loop and surface "another server holds this" to the user, rather than
+retrying forever and producing a tug-of-war that degrades both integrations.
+Forcing the issue is `reclaim_player`, and the user has to ask for it.
+
+The client id is a **MAC** (`98:A3:16:D0:9E:E8`) while mDNS names by instance —
+the two-identity-view split, observed directly. The handshake name
+(`FutureProofHomes - Satellite1`) *was* learned even though the connection did
+not persist, so the name memo can be populated from a failed adoption.
+
+### `client/state` non-compliance is real and tolerated only by default
+
+```
+non-compliant client: initial client/state omitted the required 'available' field
+non-compliant client: client/state used legacy player.state instead of top-level available
+non-compliant client: client/state used the legacy top-level 'state' field
+```
+
+Confirms `UPSTREAM-AIOSENDSPIN.md` §1. The fleet works only because
+`allow_noncompliant_clients` defaults to `True`. **New open question:** what
+happens when upstream tightens that default, alongside the existing question
+about `allow_unencrypted` being removed from transition mode.
+
+### Sources are routinely all-idle
+
+Every source across `unit-7204` and `unit-7122` read `active=False,
+streaming=False`, and the three bare players did not appear in any unit's
+`players` list. Filtering `source_list` to active sources would therefore have
+rendered an **empty dropdown**. Routing a speaker to an idle source is a normal
+workflow — assign it, then start playing — so `source_list` shows all sources
+with active ones sorted first.
