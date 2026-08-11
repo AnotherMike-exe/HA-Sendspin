@@ -15,6 +15,7 @@ from homeassistant.const import CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
+from .config_flow import async_mesh_hosts
 from .const import CONF_LISTENER_URL, SUBENTRY_TYPE_PLAYER
 from .coordinator import SendspinCoordinator
 from .identity import async_load_identity, async_load_pairing_store
@@ -53,6 +54,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
     _LOGGER.debug("Sendspin server ready with server_id %s", host.server_id)
 
     coordinator = SendspinCoordinator(hass, entry, host, memo)
+    for mesh_host in async_mesh_hosts(hass):
+        coordinator.async_note_mesh_host(mesh_host)
     coordinator.async_start()
     entry.runtime_data = SendspinRuntimeData(
         host=host, coordinator=coordinator, memo=memo

@@ -19,6 +19,7 @@ Two invariants matter more than anything else here:
 
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 from typing import TYPE_CHECKING
 
@@ -32,10 +33,13 @@ from aiosendspin.server.server import (
     SendspinServer,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.debounce import Debouncer
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
+from .mesh import MESH_POLL_INTERVAL_S, MeshClient, MeshView
 from .models import EndpointSnapshot, SendspinData
 from .server_host import ServerHost, player_role
 
@@ -89,6 +93,10 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
         self._endpoints: set[str] = set()
         self._unsubscribe: callable | None = None
+        self._cancel_mesh_poll: callable | None = None
+        self._mesh = MeshClient(async_get_clientsession(hass))
+        self._mesh_view = MeshView()
+        self._mesh_hosts: list[str] = []
         self._debouncer = Debouncer(
             hass,
             _LOGGER,
@@ -99,8 +107,61 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
     @callback
     def async_start(self) -> None:
-        """Begin listening to the server."""
+        """Begin listening to the server and polling the mesh."""
         self._unsubscribe = self.host.server.add_event_listener(self._on_server_event)
+        self._cancel_mesh_poll = async_track_time_interval(
+            self.hass,
+            self._async_poll_mesh,
+            timedelta(seconds=MESH_POLL_INTERVAL_S),
+            name="sendspin-mesh-poll",
+        )
+
+    @callback
+    def async_note_mesh_host(self, host: str) -> None:
+        """Remember a unit worth asking for the mesh view.
+
+        Any one unit's view describes the whole mesh, so a single reachable
+        host bootstraps everything.
+        """
+        if host and host not in self._mesh_hosts:
+            self._mesh_hosts.append(host)
+
+    @property
+    def mesh(self) -> MeshClient:
+        """The mesh client, for entities that need to write."""
+        return self._mesh
+
+    @property
+    def mesh_view(self) -> MeshView:
+        """The last mesh view fetched."""
+        return self._mesh_view
+
+    async def async_refresh_mesh(self) -> None:
+        """Fetch the mesh now, rather than waiting for the next poll.
+
+        Used straight after a routing call so the dropdown reflects reality
+        without a five second lag.
+        """
+        await self._async_poll_mesh(None)
+
+    async def _async_poll_mesh(self, _now: object) -> None:
+        """Poll the Plum mesh, if there is one.
+
+        An unreachable mesh yields no sources but must not mark anything
+        unavailable: speakers are adopted and controlled through our own
+        server, which knows nothing about this API.
+        """
+        hosts = [*self._mesh_hosts]
+        # Units discovered through the view itself are just as good to ask.
+        hosts += [s.unit_host for s in self._mesh_view.sources if s.unit_host]
+        if not hosts:
+            return
+        view = await self._mesh.async_fetch_view(list(dict.fromkeys(hosts)))
+        if not view.reachable:
+            return
+        if view.sources != self._mesh_view.sources:
+            self._mesh_view = view
+            self.async_request_publish()
 
     @callback
     def async_stop(self) -> None:
@@ -112,6 +173,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
+        if self._cancel_mesh_poll is not None:
+            self._cancel_mesh_poll()
+            self._cancel_mesh_poll = None
         self._debouncer.async_shutdown()
 
     @callback
@@ -216,6 +280,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 volume = role.get_player_volume()
                 muted = role.get_player_muted()
 
+            assigned = self._mesh_view.source_for_player(client_id)
+
             endpoints[frozen_url] = EndpointSnapshot(
                 frozen_url=frozen_url,
                 dial_url=dial_url,
@@ -225,6 +291,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 yielded_reason=yielded_by_dial.get(dial_url),
                 volume=volume,
                 muted=muted,
+                source_label=assigned.label if assigned is not None else None,
             )
 
-        return SendspinData(endpoints=endpoints)
+        return SendspinData(
+            endpoints=endpoints, sources=tuple(self._mesh_view.sorted_sources)
+        )

@@ -1,0 +1,129 @@
+{
+  "local_unit_id": "unit-7204",
+  "units": [
+    {
+      "has_player": true,
+      "host": "192.168.7.204",
+      "hostname": "Plum-AMP100",
+      "local_player": {
+        "album": null,
+        "artist": null,
+        "attached": true,
+        "connection_reason": "discovery",
+        "group_id": "bad7a3f2-0f36-4933-b175-f39df053ca4e",
+        "group_name": null,
+        "name": "Plum Amp100",
+        "playback_state": "stopped",
+        "player_id": "player-7204",
+        "playing": false,
+        "server_id": "1d95425e51ef4db8b578d1b010c33414",
+        "server_name": "Music Assistant",
+        "title": null,
+        "url": "ws://192.168.7.204:8928/sendspin"
+      },
+      "name": "Plum Amp100",
+      "players": [],
+      "sources": [
+        {
+          "active": false,
+          "group_id": "9607156d-57d5-488f-803f-8539638f535e",
+          "group_name": null,
+          "name": "204 AP",
+          "player_ids": [],
+          "source_id": "airplay-1",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": false
+        },
+        {
+          "active": false,
+          "group_id": "77e00184-813c-4ab6-9b1b-48c1ed383e27",
+          "group_name": null,
+          "name": "204 BT",
+          "player_ids": [],
+          "source_id": "bluetooth-1",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": false
+        }
+      ],
+      "unit_id": "unit-7204"
+    },
+    {
+      "has_player": true,
+      "host": "192.168.7.122",
+      "hostname": "PLUM-TEST-PI4-01",
+      "local_player": {
+        "album": null,
+        "artist": null,
+        "attached": true,
+        "connection_reason": "discovery",
+        "group_id": "b46b1109-9c36-4780-b70e-5d03af57948f",
+        "group_name": null,
+        "name": "Plum RackPi",
+        "playback_state": "stopped",
+        "player_id": "player-7122",
+        "playing": false,
+        "server_id": "1d95425e51ef4db8b578d1b010c33414",
+        "server_name": "Music Assistant",
+        "title": null,
+        "url": "ws://192.168.7.122:8928/sendspin"
+      },
+      "name": "Plum RackPi",
+      "players": [],
+      "sources": [
+        {
+          "active": false,
+          "group_id": "66692497-7dc6-471d-8231-9638a91d9e9d",
+          "group_name": null,
+          "name": "VLAN7 AirPlay",
+          "player_ids": [],
+          "source_id": "airplay-1",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": false
+        },
+        {
+          "active": false,
+          "group_id": "d3fa1ed3-e1e2-47e7-9945-7bc36bb049d0",
+          "group_name": null,
+          "name": "VLan7 Spotify",
+          "player_ids": [],
+          "source_id": "spotify-1",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": true
+        },
+        {
+          "active": false,
+          "group_id": "80e2b0b2-4626-46ee-ae1d-f02afd435032",
+          "group_name": null,
+          "name": "RackPi BT",
+          "player_ids": [],
+          "source_id": "bluetooth-1",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": false
+        },
+        {
+          "active": false,
+          "group_id": "247948e4-4cce-4bbc-bd28-e70194721a14",
+          "group_name": null,
+          "name": "VLAN 7 Spotify 2",
+          "player_ids": [],
+          "source_id": "spotify-2",
+          "source_muted": null,
+          "source_volume": null,
+          "streaming": false,
+          "supports_source_volume": true
+        }
+      ],
+      "unit_id": "unit-7122"
+    }
+  ]
+}

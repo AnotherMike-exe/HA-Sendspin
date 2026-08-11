@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 HUB_UNIQUE_ID = "hub"
 
 _DISCOVERED = "discovered"
+_MESH_HOSTS = "mesh_hosts"
 
 
 @callback
@@ -54,6 +55,17 @@ def async_discovered_players(hass: HomeAssistant) -> dict[str, SendspinDiscovery
 def async_remember_discovery(hass: HomeAssistant, found: SendspinDiscovery) -> None:
     """Cache a discovery so it can be offered for adoption later."""
     async_discovered_players(hass)[found.listener_url] = found
+
+
+@callback
+def async_mesh_hosts(hass: HomeAssistant) -> set[str]:
+    """Hosts of discovered Sendspin servers, worth asking for a mesh view.
+
+    A Plum-Audio unit advertises its Sendspin server over mDNS but does NOT
+    advertise its HTTP mesh API, so the address has to be taken from the
+    Sendspin record and the port assumed.
+    """
+    return hass.data.setdefault(DOMAIN, {}).setdefault(_MESH_HOSTS, set())
 
 
 class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -123,6 +135,11 @@ class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if found.kind == "player":
             async_remember_discovery(self.hass, found)
+        else:
+            async_mesh_hosts(self.hass).add(found.host)
+            for entry in self._async_current_entries():
+                if (runtime := getattr(entry, "runtime_data", None)) is not None:
+                    runtime.coordinator.async_note_mesh_host(found.host)
 
         if self._async_current_entries():
             # The hub exists; the user adopts from the cache via "Add device".

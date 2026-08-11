@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .coordinator import SendspinCoordinator
+    from .mesh import MeshSource
     from .player_memo import PlayerMemo
     from .server_host import ServerHost
 
@@ -47,6 +48,11 @@ class EndpointSnapshot:
 
     muted: bool | None = None
 
+    source_label: str | None = None
+    """The stream this endpoint is currently assigned to, or None when it is
+    on nothing. Derived from the mesh view, which is the only place that
+    knows — a Sendspin server tells outsiders nothing about its groups."""
+
 
 @dataclass(frozen=True, slots=True)
 class SendspinData:
@@ -56,6 +62,11 @@ class SendspinData:
     """Keyed on frozen_url. Contains every **adopted** endpoint, whether or not
     it is currently connected — a speaker that drops off must go unavailable,
     not vanish."""
+
+    sources: tuple[MeshSource, ...] = ()
+    """Streams available right now, rebuilt on every mesh poll. Empty with no
+    Plum mesh on the network, which is a legitimate state rather than an
+    error — the integration still adopts and controls speakers."""
 
 
 @dataclass(slots=True)

@@ -21,11 +21,13 @@ from homeassistant.components.media_player import (
     MediaPlayerState,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import SendspinConfigEntry
-from .const import CONF_LISTENER_URL, SUBENTRY_TYPE_PLAYER
+from .const import CONF_LISTENER_URL, SOURCE_NONE, SUBENTRY_TYPE_PLAYER
 from .entity import SendspinEndpointEntity
+from .mesh import MeshError
 from .server_host import player_role
 
 
@@ -88,7 +90,83 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             features |= MediaPlayerEntityFeature.VOLUME_SET
         if endpoint.muted is not None:
             features |= MediaPlayerEntityFeature.VOLUME_MUTE
+        if self.coordinator.data.sources:
+            # Only offered where streams actually exist — with no Plum mesh on
+            # the network there is nothing to select, and an empty dropdown is
+            # worse than no dropdown.
+            features |= MediaPlayerEntityFeature.SELECT_SOURCE
         return features
+
+    @property
+    def source_list(self) -> list[str] | None:
+        """Streams this speaker can be assigned to, right now.
+
+        Rebuilt on every mesh poll, so a source appearing or disappearing shows
+        up without any entity being created or destroyed. That is the whole
+        reason entities are anchored to speakers rather than to streams.
+
+        All sources are listed, active ones first — not just active ones.
+        Assigning a speaker and then starting the music is a normal workflow,
+        and on a real mesh everything reads inactive most of the time.
+        """
+        sources = self.coordinator.data.sources
+        if not sources:
+            return None
+        return [SOURCE_NONE, *(source.label for source in sources)]
+
+    @property
+    def source(self) -> str | None:
+        """The stream this speaker is on, or None for nothing."""
+        endpoint = self.endpoint
+        if endpoint is None:
+            return None
+        return endpoint.source_label or SOURCE_NONE
+
+    async def async_select_source(self, source: str) -> None:
+        """Assign this speaker to a stream, or take it off one.
+
+        This is the routing verb. Several speakers selecting the same source
+        *is* a group — that is Sendspin's own semantics, which is why no
+        separate grouping feature is advertised.
+        """
+        endpoint = self.endpoint
+        if endpoint is None:
+            return
+
+        current = self.coordinator.mesh_view.source_for_player(endpoint.client_id)
+
+        if source == SOURCE_NONE:
+            if current is None:
+                return
+            await self._call_mesh(
+                self.coordinator.mesh.async_unassign(
+                    current, endpoint.dial_url, endpoint.client_id
+                )
+            )
+        else:
+            target = self.coordinator.mesh_view.source_by_label(source)
+            if target is None:
+                raise HomeAssistantError(f"No Sendspin stream named {source!r}")
+            if current is not None and current.key == target.key:
+                return
+            # Stop holding it ourselves first, so we are not competing with the
+            # unit we are asking to take it. A player always yields to the
+            # newest dialer, so two servers dialling is a tug-of-war.
+            await self.coordinator.host.async_release(endpoint.dial_url)
+            await self._call_mesh(
+                self.coordinator.mesh.async_assign(target, endpoint.dial_url)
+            )
+
+        # Plum aggregates on a 2s loop, so without this the dropdown would lag
+        # the action by up to a full poll interval.
+        await self.coordinator.async_refresh_mesh()
+
+    async def _call_mesh(self, awaitable) -> None:
+        """Run a mesh call, surfacing failures to the user."""
+        try:
+            await awaitable
+        except MeshError as err:
+            raise HomeAssistantError(str(err)) from err
 
     @property
     def state(self) -> MediaPlayerState | None:
