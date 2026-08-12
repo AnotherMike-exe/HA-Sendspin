@@ -160,10 +160,12 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # Held by a server that is not a Plum unit — Music Assistant, say.
             # Its now-playing is only reachable by observing that server
             # directly, keyed by host since it exposes no mesh API.
-            holder = self._mesh_view.player_by_url(self.memo.dial_url(frozen_url))
-            if holder is not None and holder.held_by_server_id:
-                for host in self._mesh_hosts:
-                    wanted[f"server:{host}"] = host
+            # Otherwise something we cannot see holds it — a non-Plum server,
+            # or a third-party speaker that appears in no unit's mesh view at
+            # all. Such a server exposes no mesh API, so the only way to learn
+            # what it is playing is to observe it directly.
+            for host in self._mesh_hosts:
+                wanted[f"server:{host}"] = host
 
         for key in list(self._links):
             if key not in wanted:
@@ -445,6 +447,20 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
 
+    def _sole_playing_link(self) -> str | None:
+        """The only link with something playing, if there is exactly one."""
+        playing = [
+            key
+            for key, link in self._links.items()
+            if link.snapshot.connected and link.snapshot.title is not None
+        ]
+        return playing[0] if len(playing) == 1 else None
+
+    def is_connected(self, frozen_url: str) -> bool:
+        """Whether we currently hold this endpoint."""
+        snapshot = self.data.endpoints.get(frozen_url)
+        return snapshot is not None and snapshot.connected
+
     def _link_key_for_server(self, server_id: str | None) -> str | None:
         """Find the link observing a given server, by the id it reported.
 
@@ -529,6 +545,14 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if media is None and mesh_player is not None:
                 source_key = self._link_key_for_server(mesh_player.held_by_server_id)
                 media = self._media_for(source_key)
+            if media is None and not connected:
+                # Held by something we cannot identify — a third-party speaker
+                # on a non-Plum server is in no mesh view at all. When exactly
+                # one observed server is playing, it is the only candidate;
+                # with two we decline to guess rather than label a speaker with
+                # the wrong track.
+                source_key = self._sole_playing_link()
+                media = self._media_for(source_key)
 
             endpoints[frozen_url] = EndpointSnapshot(
                 frozen_url=frozen_url,
@@ -555,6 +579,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 media_duration=media.progress.duration_s
                 if media and media.progress
                 else None,
+                media_playing=bool(
+                    media
+                    and (
+                        media.playback_state == "playing"
+                        or (media.progress is not None and media.progress.playing)
+                    )
+                ),
                 media_commands=media.supported_commands if media else (),
                 media_link=source_key if media is not None else None,
                 held_by_server=(

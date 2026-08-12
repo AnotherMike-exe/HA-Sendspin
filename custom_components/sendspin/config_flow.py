@@ -47,6 +47,12 @@ _LOGGER = logging.getLogger(__name__)
 # from anything on the network.
 HUB_UNIQUE_ID = "hub"
 
+
+def _is_ipv6(url: str) -> bool:
+    """Whether a listener URL names an IPv6 host (bracketed by convention)."""
+    return "[" in url
+
+
 _DISCOVERED = "discovered"
 _MESH_HOSTS = "mesh_hosts"
 
@@ -179,6 +185,16 @@ class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
                 continue
             previous = memo.dial_url(frozen_url)
             if previous == found.listener_url:
+                continue
+            if _is_ipv6(found.listener_url) != _is_ipv6(frozen_url):
+                # The same speaker advertises over IPv4 and IPv6, so "moved"
+                # here means "seen on its other address", not a new lease.
+                # Following it swaps the address we dial for one the mesh does
+                # not report, which silently breaks every lookup keyed on it.
+                continue
+            if runtime.coordinator.is_connected(frozen_url):
+                # It is answering where we already dial it. A record for some
+                # other address is not a reason to drop a working connection.
                 continue
             _LOGGER.info(
                 "Sendspin endpoint %s has moved to %s", frozen_url, found.listener_url

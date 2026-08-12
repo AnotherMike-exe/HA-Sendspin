@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from aiosendspin.models.types import GoodbyeReason
 from aiosendspin.server.server import ClientDisconnectedEvent
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID, CONF_NAME
@@ -588,3 +589,87 @@ async def test_a_speaker_on_another_server_can_still_be_routed(
     target, url = assign.await_args.args
     assert target.unit_id == "unit-7204"
     assert url == PLAYER_URL
+
+
+async def observe_server(hass, entry, host: str, snapshot) -> None:
+    """Let the coordinator open a link to a server, then give it a state.
+
+    Built the way production does — noting the host, letting a poll create the
+    link — because links are pruned to exactly the set that is wanted, so one
+    injected by hand would vanish on the next poll.
+    """
+    coordinator = entry.runtime_data.coordinator
+    coordinator.async_note_mesh_host(host)
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(FIXTURE),
+    ):
+        await coordinator.async_refresh_mesh()
+    coordinator._links[f"server:{host}"].snapshot = snapshot
+    coordinator.async_request_publish()
+    await flush(hass)
+
+
+async def test_a_speaker_on_an_unseen_server_still_shows_what_is_playing(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A third-party speaker on a non-Plum server is in no mesh view at all.
+
+    Music Assistant exposes no mesh API and Plum only describes its own
+    speakers, so nothing links the two. When exactly one observed server is
+    playing it is the only candidate, which is enough to show the user what
+    their speaker is actually playing.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    # Music Assistant holds it, so we do not — and it said so on the way out.
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="playing",
+            title="I Remember",
+            artist="Kaskade & deadmau5",
+            supported_commands=("play", "pause"),
+        ),
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state == "playing"
+    assert state.attributes["media_title"] == "I Remember"
+    assert state.attributes["media_artist"] == "Kaskade & deadmau5"
+
+
+async def test_two_servers_playing_means_we_decline_to_guess(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Better no track than the wrong one on the wrong speaker."""
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+
+    for host, title in (("192.168.7.226", "One"), ("192.168.7.230", "Two")):
+        await observe_server(
+            hass,
+            entry,
+            host,
+            ControllerSnapshot(connected=True, playback_state="playing", title=title),
+        )
+
+    assert hass.states.get(entity_id(hass)).attributes.get("media_title") is None

@@ -76,6 +76,7 @@ class EndpointSnapshot:
     media_position: float | None = None
     media_position_updated_at: float | None = None
     media_duration: float | None = None
+    media_playing: bool = False
     media_commands: tuple[str, ...] = ()
     media_link: str | None = None
     """Which controller link supplies this endpoint's now-playing, and takes

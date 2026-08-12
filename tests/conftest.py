@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+
+from custom_components.sendspin.legacy_client import ControllerSnapshot
 
 pytest_plugins = "pytest_homeassistant_custom_component"
 
@@ -27,5 +29,16 @@ def no_controller_links():
     Left unpatched they would try to dial the addresses in the mesh fixtures.
     The protocol handling itself is covered directly in test_legacy_client.
     """
-    with patch("custom_components.sendspin.coordinator.LegacyControllerClient"):
+
+    def _make_link(*_args, **_kwargs):
+        link = MagicMock()
+        # A real, disconnected snapshot. A bare MagicMock would have truthy
+        # attributes, so every stub link would look connected and playing.
+        link.snapshot = ControllerSnapshot()
+        return link
+
+    with patch(
+        "custom_components.sendspin.coordinator.LegacyControllerClient",
+        side_effect=_make_link,
+    ):
         yield

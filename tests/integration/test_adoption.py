@@ -394,3 +394,40 @@ async def test_a_speaker_that_changes_address_keeps_its_entity(
     assert [c.url for c in fake_server.dial_calls] == [moved]
     # And no second entity appeared for what is the same speaker.
     assert set(hass.states.async_entity_ids("media_player")) == before
+
+
+async def test_a_dual_stack_speaker_does_not_flip_its_own_address(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The same speaker advertises over IPv4 and IPv6.
+
+    Treating the second as "it moved" swaps the address we dial for one the
+    mesh does not report, silently breaking every lookup keyed on it — seen on
+    a real network, where a speaker ended up dialled at fd00::… while the mesh
+    still described it by its IPv4 address.
+    """
+    await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_ZEROCONF}, data=player_record()
+    )
+    await hass.async_block_till_done()
+    entry = await setup_hub(
+        hass,
+        fake_server,
+        subentries=[
+            {
+                "subentry_type": SUBENTRY_TYPE_PLAYER,
+                "title": "Satellite1",
+                "data": {CONF_LISTENER_URL: PLAYER_URL},
+                "unique_id": PLAYER_URL,
+            }
+        ],
+    )
+
+    await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_ZEROCONF},
+        data=player_record(host="fd00:1::dea6:32ff:fe2f:8080"),
+    )
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.memo.dial_url(PLAYER_URL) == PLAYER_URL

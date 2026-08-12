@@ -221,6 +221,15 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         endpoint = self.endpoint
         if endpoint is None:
             return None
+        if endpoint.media_title is not None:
+            # Home Assistant only surfaces media attributes for a player that
+            # is playing or paused, so a speaker with an observed track must
+            # say so or its title, artist and cover art never reach the UI.
+            return (
+                MediaPlayerState.PLAYING
+                if endpoint.media_playing
+                else MediaPlayerState.PAUSED
+            )
         if endpoint.source_label is not None:
             return (
                 MediaPlayerState.PLAYING
