@@ -60,6 +60,10 @@ _TIME_SYNC_INTERVAL_S = 30.0
 # otherwise be polled forever.
 _SWITCH_ATTEMPTS = 6
 _SWITCH_INTERVAL_S = 4.0
+# Having cycled without finding anything, wait before going round again. A
+# server that starts playing later must still be found — hunting only once per
+# connection left a link parked in its solo group reporting idle forever.
+_SWITCH_REST_S = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,14 +119,22 @@ class LegacyControllerClient:
         client_id: str,
         on_update: Callable[[ControllerSnapshot], None],
         artwork_size: int = 512,
+        hunt_for_playing: bool = True,
     ) -> None:
-        """Prepare a link. Call `async_start` to open it."""
+        """Prepare a link. Call `async_start` to open it.
+
+        `hunt_for_playing` cycles the controller through the server's playing
+        groups. Turn it off for a link whose client id already targets a
+        specific source — hunting would move it off the group it was placed in
+        on purpose.
+        """
         self._session = session
         self._url = url
         self._client_name = client_name
         self._client_id = client_id
         self._on_update = on_update
         self._artwork_size = artwork_size
+        self._hunt = hunt_for_playing
 
         self._task: asyncio.Task | None = None
         self._ws: Any = None

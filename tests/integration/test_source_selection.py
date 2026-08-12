@@ -874,3 +874,39 @@ async def test_another_server_is_offered_as_a_source(
 
     assert fake_server.live_dial_urls == set()
     assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+
+
+async def test_the_server_we_read_from_is_named_as_the_source(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Showing a server's track while reporting "None" was contradictory.
+
+    A third-party speaker appears in no mesh view, so nothing said who held it
+    — but if we are reading its now-playing from a server, that server has it.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="playing",
+            title="I Remember",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["media_title"] == "I Remember"
+    assert state.attributes["source"] == "Music Assistant"
+    assert state.attributes["held_by"] == "Music Assistant"

@@ -246,3 +246,26 @@ def test_hunting_stops_once_something_is_playing() -> None:
 
     assert client.snapshot.title == "I Remember"
     assert client.snapshot.playback_state == "playing"
+
+
+def test_a_targeted_link_never_hunts() -> None:
+    """A `ctrl:<source_id>` link is placed on its source on purpose.
+
+    Cycling it through playing groups would move it off the very group it was
+    aimed at, so the source it was opened to observe would stop being observed.
+    """
+    client = LegacyControllerClient(
+        session=None,
+        url="ws://192.168.7.204:8927/sendspin",
+        client_name="Home",
+        client_id="ctrl:airplay-1:ha",
+        on_update=lambda _s: None,
+        hunt_for_playing=False,
+    )
+
+    assert client._hunt is False
+
+
+def test_a_server_link_hunts_by_default() -> None:
+    """A plain server link has no source to name, so it has to go looking."""
+    assert make_client([])._hunt is True

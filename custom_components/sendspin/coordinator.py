@@ -196,6 +196,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 # The nonce keeps two Home Assistants from colliding on one id.
                 client_id=client_id,
                 on_update=lambda _snapshot: self.async_request_publish(),
+                # A `ctrl:` link is placed on its source deliberately; hunting
+                # would move it off the very group it was aimed at.
+                hunt_for_playing=key.startswith("server:"),
             )
             self._links[key] = link
             link.async_start()
@@ -668,7 +671,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 media_commands=media.supported_commands if media else (),
                 media_link=source_key if media is not None else None,
                 held_by_server=(
-                    mesh_player.held_by if mesh_player is not None else None
+                    mesh_player.held_by
+                    if mesh_player is not None and mesh_player.held_by
+                    # Nothing in the mesh knows this speaker, but we are reading
+                    # its now-playing from a server — so that server has it.
+                    # Reporting "None" while showing that server's track and
+                    # cover art was simply contradictory.
+                    else (media.server_name if media is not None else None)
                 ),
                 routed_away=self.memo.routed_away(frozen_url),
             )
