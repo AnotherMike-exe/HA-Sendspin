@@ -471,10 +471,17 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
     def _sole_playing_link(self) -> str | None:
         """The only link with something playing, if there is exactly one."""
+        # Actually playing, not merely holding a title. A server keeps the
+        # last track's metadata after it stops, so counting titles made an idle
+        # server look like a candidate — two candidates meant declining to
+        # guess, and the speaker's now-playing flickered in and out as the idle
+        # server's stale title came and went.
         playing = [
             key
             for key, link in self._links.items()
-            if link.snapshot.connected and link.snapshot.title is not None
+            if link.snapshot.connected
+            and link.snapshot.title is not None
+            and link.snapshot.playback_state == "playing"
         ]
         return playing[0] if len(playing) == 1 else None
 

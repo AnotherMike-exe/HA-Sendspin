@@ -15,6 +15,7 @@ than offering controls that cannot be honoured.
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
@@ -296,18 +297,35 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return None
         return dt_util.utc_from_timestamp(endpoint.media_position_updated_at)
 
+    @property
+    def media_image_hash(self) -> str | None:
+        """Identify the current cover art.
+
+        Home Assistant derives this from `media_image_url` and, finding none,
+        publishes no picture and never asks for the image — so binary artwork
+        would be read correctly and then thrown away. Hashing the bytes gives
+        it something to key the proxy URL on, and changes when the art does.
+        """
+        artwork = self._artwork()
+        return hashlib.sha256(artwork).hexdigest()[:16] if artwork else None
+
+    def _artwork(self) -> bytes | None:
+        """Raw cover art from the link observing this speaker's stream."""
+        link = self.coordinator.link_for(
+            self.endpoint.media_link if self.endpoint else None
+        )
+        return link.snapshot.artwork if link is not None else None
+
     async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
         """Cover art, pushed as binary frames by the artwork role.
 
         Plum-Audio publishes no `artwork_url`, so these frames are the only
         cover art that exists.
         """
-        link = self.coordinator.link_for(
-            self.endpoint.media_link if self.endpoint else None
-        )
-        if link is None or not link.snapshot.artwork:
+        artwork = self._artwork()
+        if not artwork:
             return None, None
-        return link.snapshot.artwork, "image/jpeg"
+        return artwork, "image/jpeg"
 
     async def async_media_play(self) -> None:
         """Resume the stream this speaker is on."""

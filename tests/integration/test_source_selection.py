@@ -673,3 +673,81 @@ async def test_two_servers_playing_means_we_decline_to_guess(
         )
 
     assert hass.states.get(entity_id(hass)).attributes.get("media_title") is None
+
+
+async def test_an_idle_servers_stale_title_does_not_block_attribution(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A server keeps the last track's metadata after it stops.
+
+    Counting titles made an idle server look like a second candidate, so the
+    rule declined and the speaker's now-playing flickered in and out as that
+    stale title came and went.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+
+    # An idle server still holding the last track it played.
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.204",
+        ControllerSnapshot(
+            connected=True, playback_state="stopped", title="Talk In Your Sleep"
+        ),
+    )
+    # And the one actually playing.
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True, playback_state="playing", title="I Remember"
+        ),
+    )
+
+    assert hass.states.get(entity_id(hass)).attributes["media_title"] == "I Remember"
+
+
+async def test_binary_artwork_reaches_home_assistant(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Home Assistant fetches an image only when the entity offers a hash.
+
+    It derives that hash from `media_image_url`, which binary artwork does not
+    have — so without an override the art is read correctly off the wire and
+    then silently dropped.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="playing",
+            title="I Remember",
+            artwork=b"\xff\xd8jpegbytes",
+        ),
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes.get("entity_picture") is not None
+
+    player = hass.data["media_player"].get_entity(entity_id(hass))
+    assert await player.async_get_media_image() == (b"\xff\xd8jpegbytes", "image/jpeg")
