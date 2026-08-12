@@ -39,7 +39,9 @@ from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DOMAIN
+from .const import DEFAULT_SERVER_PORT as SENDSPIN_SERVER_PORT
+from .const import DEFAULT_WEBSOCKET_PATH, DOMAIN
+from .legacy_client import LegacyControllerClient
 from .mesh import MESH_POLL_INTERVAL_S, MeshClient, MeshView
 from .models import EndpointSnapshot, SendspinData
 from .server_host import ServerHost, player_role
@@ -110,6 +112,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         self._mesh_view = MeshView()
         self._mesh_hosts: list[str] = []
         self._strand_checks: dict[str, int] = {}
+        self._links: dict[str, LegacyControllerClient] = {}
         self._routed_at: dict[str, float] = {}
         self._stopped = False
         self._debouncer = Debouncer(
@@ -130,6 +133,55 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             timedelta(seconds=MESH_POLL_INTERVAL_S),
             name="sendspin-mesh-poll",
         )
+
+    @callback
+    def _async_sync_links(self) -> None:
+        """Observe exactly the sources our speakers are actually on.
+
+        A controller sees only the group it occupies, so reading what is
+        playing needs one connection per source. Plum-Audio honours a client id
+        of `ctrl:<source_id>:<nonce>` by placing that controller into the named
+        source's group, which makes the target deterministic rather than
+        whichever source happens to be primary.
+
+        Only sources with one of our speakers on them are observed — a link per
+        idle source would be a websocket each, for nothing.
+        """
+        if self._stopped:
+            return
+
+        wanted: dict[str, str] = {}
+        for frozen_url in self._endpoints:
+            client_id = self.memo.client_id(frozen_url)
+            source = self._mesh_view.source_for_player(client_id)
+            if source is not None and source.unit_host:
+                wanted[source.key] = source.unit_host
+
+        for key in list(self._links):
+            if key not in wanted:
+                link = self._links.pop(key)
+                self.hass.async_create_task(link.async_stop(), "sendspin-link-stop")
+
+        for key, host in wanted.items():
+            if key in self._links:
+                continue
+            source_id = key.split(":", 1)[1]
+            link = LegacyControllerClient(
+                async_get_clientsession(self.hass),
+                f"ws://{host}:{SENDSPIN_SERVER_PORT}{DEFAULT_WEBSOCKET_PATH}",
+                client_name=(
+                    self.config_entry.title if self.config_entry else "Home Assistant"
+                ),
+                # The nonce keeps two Home Assistants from colliding on one id.
+                client_id=f"ctrl:{source_id}:ha{self.host.server_id[:8]}",
+                on_update=lambda _snapshot: self.async_request_publish(),
+            )
+            self._links[key] = link
+            link.async_start()
+
+    def link_for(self, source_key: str | None) -> LegacyControllerClient | None:
+        """The controller link observing a given source, if any."""
+        return self._links.get(source_key) if source_key else None
 
     @callback
     def async_relocate_endpoint(self, frozen_url: str, previous: str) -> None:
@@ -215,6 +267,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             or view.players != self._mesh_view.players
         )
         self._mesh_view = view
+        self._async_sync_links()
         if not self._stopped:
             await self._async_rescue_stranded()
         if changed:
@@ -277,6 +330,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         reload leaves it armed against a coordinator that is going away.
         """
         self._stopped = True
+        for link in self._links.values():
+            self.hass.async_create_task(link.async_stop(), "sendspin-link-stop")
+        self._links.clear()
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -373,6 +429,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
 
+    def _media_for(self, source_key: str | None):
+        """The now-playing observed on a source, if we are observing it."""
+        link = self._links.get(source_key) if source_key else None
+        if link is None or not link.snapshot.connected:
+            return None
+        return link.snapshot
+
     def _client_id_for(self, frozen_url: str, dial_url: str) -> str | None:
         """Identify a speaker, in descending order of directness.
 
@@ -431,6 +494,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
             assigned = self._mesh_view.source_for_player(client_id)
 
+            source_key = assigned.key if assigned is not None else None
+            media = self._media_for(source_key)
+
             endpoints[frozen_url] = EndpointSnapshot(
                 frozen_url=frozen_url,
                 dial_url=dial_url,
@@ -444,6 +510,20 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 source_streaming=assigned.streaming if assigned is not None else False,
                 held_by_unit_host=held_by,
                 known_to_mesh=mesh_player is not None,
+                media_title=media.title if media else None,
+                media_artist=media.artist if media else None,
+                media_album=media.album if media else None,
+                media_position=media.progress.position_s
+                if media and media.progress
+                else None,
+                media_position_updated_at=(
+                    media.progress.updated_at if media and media.progress else None
+                ),
+                media_duration=media.progress.duration_s
+                if media and media.progress
+                else None,
+                media_commands=media.supported_commands if media else (),
+                media_link=source_key if media is not None else None,
                 held_by_server=(
                     mesh_player.held_by if mesh_player is not None else None
                 ),

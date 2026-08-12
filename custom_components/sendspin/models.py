@@ -70,6 +70,17 @@ class EndpointSnapshot:
     """The Plum unit currently holding this speaker, if any. Volume has to be
     commanded through whoever holds the connection."""
 
+    media_title: str | None = None
+    media_artist: str | None = None
+    media_album: str | None = None
+    media_position: float | None = None
+    media_position_updated_at: float | None = None
+    media_duration: float | None = None
+    media_commands: tuple[str, ...] = ()
+    media_link: str | None = None
+    """Which controller link supplies this endpoint's now-playing, and takes
+    its transport commands. None when nothing is observing the stream."""
+
     routed_away: bool = False
     """The user deliberately handed this speaker to another unit. We must not
     dial it again on restart, or a reload would yank it back off the stream

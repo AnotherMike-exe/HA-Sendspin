@@ -14,21 +14,34 @@ than offering controls that cannot be honoured.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    MediaType,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import dt as dt_util
 
 from . import SendspinConfigEntry
 from .const import CONF_LISTENER_URL, SOURCE_NONE, SUBENTRY_TYPE_PLAYER
 from .entity import SendspinEndpointEntity
 from .mesh import MeshError
 from .server_host import player_role
+
+# Sendspin command name -> the Home Assistant feature it satisfies.
+_TRANSPORT_FEATURES = {
+    "play": MediaPlayerEntityFeature.PLAY,
+    "pause": MediaPlayerEntityFeature.PAUSE,
+    "stop": MediaPlayerEntityFeature.STOP,
+    "next": MediaPlayerEntityFeature.NEXT_TRACK,
+    "previous": MediaPlayerEntityFeature.PREVIOUS_TRACK,
+}
 
 
 async def async_setup_entry(
@@ -103,6 +116,13 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         # made the control destroy itself the moment it succeeded.
         if self.coordinator.data.sources:
             features |= MediaPlayerEntityFeature.SELECT_SOURCE
+
+        # Transport reflects what the server observing this stream actually
+        # advertises. Offering a button that will be silently dropped is worse
+        # than not offering it.
+        for command, feature in _TRANSPORT_FEATURES.items():
+            if command in endpoint.media_commands:
+                features |= feature
         return features
 
     @property
@@ -205,6 +225,8 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return (
                 MediaPlayerState.PLAYING
                 if endpoint.source_streaming
+                else MediaPlayerState.PAUSED
+                if endpoint.media_title is not None
                 else MediaPlayerState.IDLE
             )
         if (
@@ -215,6 +237,105 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             # Present, just not on a stream — or on another server entirely.
             return MediaPlayerState.IDLE
         return MediaPlayerState.OFF
+
+    @property
+    def media_title(self) -> str | None:
+        """What is playing on this speaker's stream."""
+        return self.endpoint.media_title if self.endpoint else None
+
+    @property
+    def media_artist(self) -> str | None:
+        """Artist of the current track."""
+        return self.endpoint.media_artist if self.endpoint else None
+
+    @property
+    def media_album_name(self) -> str | None:
+        """Album of the current track."""
+        return self.endpoint.media_album if self.endpoint else None
+
+    @property
+    def media_content_type(self) -> MediaType | None:
+        """Sendspin carries audio and says nothing finer."""
+        return MediaType.MUSIC if self.endpoint and self.endpoint.media_title else None
+
+    @property
+    def media_duration(self) -> int | None:
+        """Track length in seconds, or None for a live stream."""
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.media_duration is None:
+            return None
+        return int(endpoint.media_duration)
+
+    @property
+    def media_position(self) -> int | None:
+        """Position in seconds, as of `media_position_updated_at`.
+
+        Reported rather than extrapolated: position is never pushed
+        periodically, and Home Assistant already advances it from the timestamp
+        while the entity is playing.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.media_position is None:
+            return None
+        return int(endpoint.media_position)
+
+    @property
+    def media_position_updated_at(self) -> datetime | None:
+        """When the position was last reported."""
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.media_position_updated_at is None:
+            return None
+        return dt_util.utc_from_timestamp(endpoint.media_position_updated_at)
+
+    async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
+        """Cover art, pushed as binary frames by the artwork role.
+
+        Plum-Audio publishes no `artwork_url`, so these frames are the only
+        cover art that exists.
+        """
+        link = self.coordinator.link_for(
+            self.endpoint.media_link if self.endpoint else None
+        )
+        if link is None or not link.snapshot.artwork:
+            return None, None
+        return link.snapshot.artwork, "image/jpeg"
+
+    async def async_media_play(self) -> None:
+        """Resume the stream this speaker is on."""
+        await self._async_transport("play")
+
+    async def async_media_pause(self) -> None:
+        """Pause the stream this speaker is on."""
+        await self._async_transport("pause")
+
+    async def async_media_stop(self) -> None:
+        """Stop the stream this speaker is on."""
+        await self._async_transport("stop")
+
+    async def async_media_next_track(self) -> None:
+        """Skip forward on the stream this speaker is on."""
+        await self._async_transport("next")
+
+    async def async_media_previous_track(self) -> None:
+        """Skip back on the stream this speaker is on."""
+        await self._async_transport("previous")
+
+    async def _async_transport(self, command: str) -> None:
+        """Send a transport command to the server driving this stream.
+
+        These act on the **stream**, not the speaker: everything listening to
+        it is affected, which is what a group means in Sendspin.
+        """
+        endpoint = self.endpoint
+        link = self.coordinator.link_for(endpoint.media_link if endpoint else None)
+        if link is None:
+            raise HomeAssistantError(
+                "Nothing is observing this stream, so it cannot be controlled"
+            )
+        try:
+            await link.async_send_command(command)
+        except ConnectionError as err:
+            raise HomeAssistantError(str(err)) from err
 
     @property
     def volume_level(self) -> float | None:
