@@ -113,6 +113,14 @@ async def _async_restore_adoptions(
             # subentry title is what the user already sees.
             memo.remember_discovery(frozen_url, instance_name=subentry.title)
         coordinator.async_track_endpoint(frozen_url)
+        if memo.routed_away(frozen_url):
+            # The user put this speaker on another unit's stream. Dialling it
+            # would take it straight back off, so the entity exists but we do
+            # not compete for the speaker.
+            _LOGGER.debug(
+                "Not dialling %s: routed to another unit by the user", frozen_url
+            )
+            continue
         await host.async_adopt(memo.dial_url(frozen_url))
 
 

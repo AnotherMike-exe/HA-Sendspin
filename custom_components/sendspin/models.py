@@ -53,6 +53,15 @@ class EndpointSnapshot:
     on nothing. Derived from the mesh view, which is the only place that
     knows — a Sendspin server tells outsiders nothing about its groups."""
 
+    source_streaming: bool = False
+    """Audio is actually flowing on the assigned stream. We can know this even
+    when another server holds the speaker, because it comes from the mesh."""
+
+    routed_away: bool = False
+    """The user deliberately handed this speaker to another unit. We must not
+    dial it again on restart, or a reload would yank it back off the stream
+    they put it on."""
+
 
 @dataclass(frozen=True, slots=True)
 class SendspinData:

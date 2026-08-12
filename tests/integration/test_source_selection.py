@@ -249,3 +249,95 @@ async def test_a_yielded_speaker_stays_visible_and_explains_itself(
     assert state.attributes["yielded_to"] == "contested"
     # And it still reports which stream it is on, which is the useful part.
     assert state.attributes["source"] == "Plum Amp100 / 204 AP"
+
+
+# --- The control must survive its own success -------------------------------
+#
+# Observed live: selecting a stream worked and audio flowed, but the dropdown
+# then vanished. Handing the speaker to another unit is exactly what makes us
+# stop holding it, and supported_features was gated on holding it.
+
+
+async def test_the_dropdown_survives_handing_the_speaker_away(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Routing is an HTTP call keyed on the URL, not something we need to hold.
+
+    Otherwise the control destroys itself the moment it works, and the speaker
+    can never be moved again from Home Assistant.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    payload["units"][0]["sources"][0]["streaming"] = True
+    payload["units"][0]["sources"][0]["active"] = True
+    await setup_with_mesh(hass, fake_server, payload)
+
+    # We are no longer holding it — the other unit is.
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state != "unavailable"
+    assert (
+        state.attributes["supported_features"] & MediaPlayerEntityFeature.SELECT_SOURCE
+    )
+    assert SOURCE_NONE in state.attributes["source_list"]
+    assert state.attributes["source"] == "Plum Amp100 / 204 AP"
+
+
+async def test_a_speaker_on_a_live_stream_reports_playing(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Do not report idle over the top of music.
+
+    We originate no audio, but the mesh tells us whether audio is flowing on
+    the stream the speaker sits on.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    payload["units"][0]["sources"][0]["streaming"] = True
+    await setup_with_mesh(hass, fake_server, payload)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    await flush(hass)
+
+    assert hass.states.get(entity_id(hass)).state == "playing"
+
+
+async def test_routing_a_speaker_away_survives_a_restart(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A reload must not yank a speaker back off the stream the user chose.
+
+    Adoption is restored on every setup, so without remembering the hand-off
+    the next restart re-dials the speaker and steals it back.
+    """
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    with (
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+            return_value=parse_view(FIXTURE),
+        ),
+        patch("custom_components.sendspin.mesh.MeshClient.async_assign", AsyncMock()),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Plum RackPi / VLAN7 AirPlay"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+
+    fake_server.dial_calls.clear()
+    with patch(
+        "custom_components.sendspin.server_host.SendspinServer",
+        return_value=fake_server,
+    ):
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert fake_server.dial_calls == []
+    # The entity still exists; we simply are not competing for the speaker.
+    assert hass.states.async_entity_ids("media_player")

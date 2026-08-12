@@ -55,5 +55,10 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
         if endpoint is None:
             return False
         return super().available and (
-            endpoint.connected or endpoint.yielded_reason is not None
+            endpoint.connected
+            or endpoint.yielded_reason is not None
+            # The mesh can see it sitting on a stream. Not holding a speaker is
+            # not the same as having lost it — and it is the normal state after
+            # the user routes it to another unit.
+            or endpoint.source_label is not None
         )

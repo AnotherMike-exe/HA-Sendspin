@@ -312,6 +312,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 volume=volume,
                 muted=muted,
                 source_label=assigned.label if assigned is not None else None,
+                source_streaming=assigned.streaming if assigned is not None else False,
+                routed_away=self.memo.routed_away(frozen_url),
             )
 
         return SendspinData(

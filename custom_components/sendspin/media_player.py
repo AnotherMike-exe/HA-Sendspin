@@ -82,18 +82,25 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         cannot show the current level is worse than offering nothing.
         """
         endpoint = self.endpoint
-        if endpoint is None or not endpoint.connected:
+        if endpoint is None:
             return MediaPlayerEntityFeature(0)
 
         features = MediaPlayerEntityFeature(0)
-        if endpoint.volume is not None:
-            features |= MediaPlayerEntityFeature.VOLUME_SET
-        if endpoint.muted is not None:
-            features |= MediaPlayerEntityFeature.VOLUME_MUTE
+
+        # Volume and mute are commanded over OUR connection, so they need us to
+        # actually be holding the speaker.
+        if endpoint.connected:
+            if endpoint.volume is not None:
+                features |= MediaPlayerEntityFeature.VOLUME_SET
+            if endpoint.muted is not None:
+                features |= MediaPlayerEntityFeature.VOLUME_MUTE
+
+        # Source selection does NOT. It is an HTTP call to the owning unit,
+        # keyed on the speaker's URL, so it works whether or not we hold the
+        # speaker — and it has to, because handing a speaker to another unit is
+        # precisely what makes us stop holding it. Gating this on `connected`
+        # made the control destroy itself the moment it succeeded.
         if self.coordinator.data.sources:
-            # Only offered where streams actually exist — with no Plum mesh on
-            # the network there is nothing to select, and an empty dropdown is
-            # worse than no dropdown.
             features |= MediaPlayerEntityFeature.SELECT_SOURCE
         return features
 
@@ -135,14 +142,20 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
         current = self.coordinator.mesh_view.source_for_player(endpoint.client_id)
 
+        memo = self.coordinator.memo
+
         if source == SOURCE_NONE:
-            if current is None:
-                return
-            await self._call_mesh(
-                self.coordinator.mesh.async_unassign(
-                    current, endpoint.dial_url, endpoint.client_id
+            if current is not None:
+                await self._call_mesh(
+                    self.coordinator.mesh.async_unassign(
+                        current, endpoint.dial_url, endpoint.client_id
+                    )
                 )
-            )
+            # Taking it off a stream means we want it back, so start holding it
+            # again and stop suppressing adoption on restart.
+            memo.set_routed_away(self._frozen_url, False)
+            memo.async_schedule_save()
+            await self.coordinator.host.async_adopt(endpoint.dial_url)
         else:
             target = self.coordinator.mesh_view.source_by_label(source)
             if target is None:
@@ -153,6 +166,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             # unit we are asking to take it. A player always yields to the
             # newest dialer, so two servers dialling is a tug-of-war.
             await self.coordinator.host.async_release(endpoint.dial_url)
+            # Remember this was deliberate. Otherwise the next restart re-dials
+            # the speaker and takes it straight back off the stream.
+            memo.set_routed_away(self._frozen_url, True)
+            memo.async_schedule_save()
             await self._call_mesh(
                 self.coordinator.mesh.async_assign(target, endpoint.dial_url)
             )
@@ -170,20 +187,25 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
     @property
     def state(self) -> MediaPlayerState | None:
-        """Home Assistant renders `None` as unknown, which is the honest answer.
+        """What this speaker is doing, as far as anything can tell us.
 
-        Nothing can be playing yet: Home Assistant originates no audio in this
-        version, so a connected endpoint is idle by definition.
+        Home Assistant originates no audio, so a speaker we hold is idle by
+        definition. But a speaker sitting on someone else's stream may well be
+        playing, and the mesh tells us whether audio is flowing on it — so say
+        so rather than reporting idle over the top of music.
         """
         endpoint = self.endpoint
         if endpoint is None:
             return None
-        if endpoint.yielded_reason is not None:
-            # Alive and probably playing — just not ours to drive.
+        if endpoint.source_label is not None:
+            return (
+                MediaPlayerState.PLAYING
+                if endpoint.source_streaming
+                else MediaPlayerState.IDLE
+            )
+        if endpoint.connected or endpoint.yielded_reason is not None:
             return MediaPlayerState.IDLE
-        if not endpoint.connected:
-            return MediaPlayerState.OFF
-        return MediaPlayerState.IDLE
+        return MediaPlayerState.OFF
 
     @property
     def volume_level(self) -> float | None:
@@ -212,9 +234,14 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         broken. See docs/OPEN-QUESTIONS.md §7.
         """
         endpoint = self.endpoint
-        if endpoint is None or endpoint.yielded_reason is None:
+        if endpoint is None:
             return None
-        return {"yielded_to": endpoint.yielded_reason}
+        attributes: dict[str, str] = {}
+        if endpoint.yielded_reason is not None:
+            attributes["yielded_to"] = endpoint.yielded_reason
+        if endpoint.routed_away:
+            attributes["routed_away"] = "true"
+        return attributes or None
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Command the speaker's volume."""

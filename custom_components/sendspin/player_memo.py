@@ -46,6 +46,7 @@ _KEY_INSTANCE_NAME = "mdns_instance_name"
 _KEY_TXT_NAME = "mdns_txt_name"
 _KEY_CLIENT_ID = "client_id"
 _KEY_DIAL_URL = "dial_url"
+_KEY_ROUTED_AWAY = "routed_away"
 
 
 def _clean(value: str | None) -> str | None:
@@ -120,6 +121,18 @@ class PlayerMemo:
             return
         _LOGGER.debug("Sendspin endpoint %s now answers at %s", frozen_url, dial_url)
         self._data.setdefault(frozen_url, {})[_KEY_DIAL_URL] = dial_url
+
+    def set_routed_away(self, frozen_url: str, routed_away: bool) -> None:
+        """Record that the user handed this speaker to another unit.
+
+        Without this, restarting Home Assistant re-dials every adopted speaker
+        and takes them straight back off the streams the user put them on.
+        """
+        self._data.setdefault(frozen_url, {})[_KEY_ROUTED_AWAY] = routed_away
+
+    def routed_away(self, frozen_url: str) -> bool:
+        """Whether this speaker was deliberately handed to another unit."""
+        return bool(self._data.get(frozen_url, {}).get(_KEY_ROUTED_AWAY, False))
 
     def forget(self, frozen_url: str) -> None:
         """Drop everything about an endpoint, on un-adoption."""
