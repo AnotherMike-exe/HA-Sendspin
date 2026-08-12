@@ -53,6 +53,14 @@ _BACKOFF_MAX_S = 60.0
 # never sends `client/time` as not operational.
 _TIME_SYNC_INTERVAL_S = 30.0
 
+# Some servers place a controller into the group that is playing; Music
+# Assistant does not, leaving it in a solo group that reports nothing. `switch`
+# cycles a controller through the server's *playing* groups, which is the only
+# way in. Bounded, because ordering is not stable and an empty server would
+# otherwise be polled forever.
+_SWITCH_ATTEMPTS = 6
+_SWITCH_INTERVAL_S = 4.0
+
 
 @dataclass(frozen=True, slots=True)
 class Progress:
@@ -120,6 +128,7 @@ class LegacyControllerClient:
         self._ws: Any = None
         self._closing = False
         self._snapshot = ControllerSnapshot()
+        self._switches = 0
         # Server clock minus ours, in microseconds.
         self._clock_offset_us = 0
 
@@ -215,7 +224,9 @@ class LegacyControllerClient:
                 {"type": "client/state", "payload": {"state": "synchronized"}}
             )
 
+            self._switches = 0
             sync = asyncio.create_task(self._time_sync_loop(ws))
+            hunt = asyncio.create_task(self._find_playing_group(ws))
             try:
                 async for msg in ws:
                     if msg.type is WSMsgType.TEXT:
@@ -226,6 +237,7 @@ class LegacyControllerClient:
                         break
             finally:
                 sync.cancel()
+                hunt.cancel()
                 self._ws = None
 
     def _hello(self) -> dict[str, Any]:
@@ -359,6 +371,37 @@ class LegacyControllerClient:
         self._publish(replace(self._snapshot, artwork=image or None))
 
     # --- clock --------------------------------------------------------------
+
+    async def _find_playing_group(self, ws: Any) -> None:
+        """Cycle into a playing group, for servers that do not put us in one.
+
+        Plum-Audio honours a `ctrl:<source_id>` client id and places the
+        controller directly. Music Assistant does not: it leaves a controller
+        in its own solo group, which reports nothing at all. `switch` moves a
+        controller through the server's playing groups, and a controller has no
+        player role, so moving between them affects no audio.
+
+        Stops as soon as something is playing, and is bounded — the cycle
+        ordering is not stable, and a server with nothing playing would
+        otherwise be asked forever.
+        """
+        while self._switches < _SWITCH_ATTEMPTS:
+            await asyncio.sleep(_SWITCH_INTERVAL_S)
+            snapshot = self._snapshot
+            if snapshot.title is not None or snapshot.playback_state == "playing":
+                return
+            if "switch" not in snapshot.supported_commands:
+                return
+            self._switches += 1
+            try:
+                await ws.send_json(
+                    {
+                        "type": "client/command",
+                        "payload": {"controller": {"command": "switch"}},
+                    }
+                )
+            except ClientError, ConnectionError:
+                return
 
     async def _time_sync_loop(self, ws: Any) -> None:
         """Keep the server's clock, as the spec expects of a controller."""

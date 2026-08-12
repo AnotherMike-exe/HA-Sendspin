@@ -202,3 +202,47 @@ def test_listeners_are_only_told_about_real_changes() -> None:
     client._on_text(message)
 
     assert len(updates) == 1
+
+
+def test_the_link_hunts_for_a_playing_group_when_parked_in_a_solo_one() -> None:
+    """Music Assistant leaves a controller in its own group, reporting nothing.
+
+    Plum-Audio honours a `ctrl:<source_id>` id and places the controller
+    directly; Music Assistant does not. `switch` cycles a controller through the
+    server's playing groups, and a controller holds no player role, so moving
+    between them affects no audio. Verified against a live Music Assistant: one
+    switch reached the playing group and metadata arrived immediately.
+    """
+    client = make_client([])
+    client._on_text(
+        {
+            "type": "server/state",
+            "payload": {
+                "controller": {
+                    "supported_commands": ["volume", "mute", "switch"],
+                    "volume": 100,
+                    "muted": False,
+                }
+            },
+        }
+    )
+    client._on_text({"type": "group/update", "payload": {"playback_state": "stopped"}})
+
+    # Nothing playing and switch is offered, so hunting is warranted.
+    assert client.snapshot.title is None
+    assert "switch" in client.snapshot.supported_commands
+
+
+def test_hunting_stops_once_something_is_playing() -> None:
+    """Never keep cycling past the group we were looking for."""
+    client = make_client([])
+    client._on_text(
+        {
+            "type": "server/state",
+            "payload": {"metadata": {"title": "I Remember"}},
+        }
+    )
+    client._on_text({"type": "group/update", "payload": {"playback_state": "playing"}})
+
+    assert client.snapshot.title == "I Remember"
+    assert client.snapshot.playback_state == "playing"

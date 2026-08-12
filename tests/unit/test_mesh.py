@@ -193,3 +193,24 @@ def test_a_units_own_speaker_is_not_listed_twice() -> None:
     view = parse_view(payload)
 
     assert len([p for p in view.players if p.player_id == "player-7204"]) == 1
+
+
+def test_the_holding_server_is_recorded_for_attribution() -> None:
+    """`local_player.server_id` and `server/hello`'s server_id are the same value.
+
+    That equality is what attaches a server's now-playing to the speakers it is
+    holding — including a server that is not a Plum unit at all.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["local_player"] = {
+        "player_id": "player-7204",
+        "url": "ws://192.168.7.204:8928/sendspin",
+        "attached": True,
+        "server_name": "Music Assistant",
+        "server_id": "1d95425e51ef4db8b578d1b010c33414",
+    }
+
+    found = parse_view(payload).player_by_url("ws://192.168.7.204:8928/sendspin")
+
+    assert found.held_by == "Music Assistant"
+    assert found.held_by_server_id == "1d95425e51ef4db8b578d1b010c33414"

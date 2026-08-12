@@ -156,6 +156,14 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             source = self._mesh_view.source_for_player(client_id)
             if source is not None and source.unit_host:
                 wanted[source.key] = source.unit_host
+                continue
+            # Held by a server that is not a Plum unit — Music Assistant, say.
+            # Its now-playing is only reachable by observing that server
+            # directly, keyed by host since it exposes no mesh API.
+            holder = self._mesh_view.player_by_url(self.memo.dial_url(frozen_url))
+            if holder is not None and holder.held_by_server_id:
+                for host in self._mesh_hosts:
+                    wanted[f"server:{host}"] = host
 
         for key in list(self._links):
             if key not in wanted:
@@ -166,6 +174,14 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if key in self._links:
                 continue
             source_id = key.split(":", 1)[1]
+            # A `ctrl:` id targets a named source, which only Plum honours. For
+            # a plain server link there is no source to name, so it hunts for a
+            # playing group instead.
+            client_id = (
+                f"ha-sendspin-{self.host.server_id[:8]}"
+                if key.startswith("server:")
+                else f"ctrl:{source_id}:ha{self.host.server_id[:8]}"
+            )
             link = LegacyControllerClient(
                 async_get_clientsession(self.hass),
                 f"ws://{host}:{SENDSPIN_SERVER_PORT}{DEFAULT_WEBSOCKET_PATH}",
@@ -173,7 +189,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                     self.config_entry.title if self.config_entry else "Home Assistant"
                 ),
                 # The nonce keeps two Home Assistants from colliding on one id.
-                client_id=f"ctrl:{source_id}:ha{self.host.server_id[:8]}",
+                client_id=client_id,
                 on_update=lambda _snapshot: self.async_request_publish(),
             )
             self._links[key] = link
@@ -429,6 +445,20 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
 
+    def _link_key_for_server(self, server_id: str | None) -> str | None:
+        """Find the link observing a given server, by the id it reported.
+
+        `local_player.server_id` in the mesh and `server/hello`'s `server_id`
+        are the same value, so this attaches what a server is playing to the
+        speakers it is holding.
+        """
+        if server_id is None:
+            return None
+        for key, link in self._links.items():
+            if link.snapshot.connected and link.snapshot.server_id == server_id:
+                return key
+        return None
+
     def _media_for(self, source_key: str | None):
         """The now-playing observed on a source, if we are observing it."""
         link = self._links.get(source_key) if source_key else None
@@ -496,6 +526,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
             source_key = assigned.key if assigned is not None else None
             media = self._media_for(source_key)
+            if media is None and mesh_player is not None:
+                source_key = self._link_key_for_server(mesh_player.held_by_server_id)
+                media = self._media_for(source_key)
 
             endpoints[frozen_url] = EndpointSnapshot(
                 frozen_url=frozen_url,

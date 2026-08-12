@@ -92,6 +92,10 @@ class MeshPlayer:
     of a speaker and ours: it lets us learn a speaker's client id without ever
     having held it, which we otherwise could not do."""
     held_by: str | None = None
+    held_by_server_id: str | None = None
+    """Identity of the server holding this speaker. Matches the `server_id` a
+    controller link reports, which is how a link's now-playing is attached to
+    the speakers actually listening to it."""
     """Name of the server currently holding this speaker — another Sendspin
     server entirely, for a unit's own speaker that something else has taken."""
     connected: bool = False
@@ -222,6 +226,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     name=local.get("name") or local_id,
                     url=local.get("url"),
                     held_by=local.get("server_name"),
+                    held_by_server_id=local.get("server_id"),
                     connected=_as_bool(local.get("attached"), False),
                 )
             )
