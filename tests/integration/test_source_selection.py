@@ -496,3 +496,41 @@ async def test_the_rescue_holds_off_right_after_a_routing_call(
     # Still handed away, and we have not started competing for it again.
     assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
     assert fake_server.dial_calls == []
+
+
+async def test_a_speaker_we_have_never_held_is_still_usable(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The bug that made two of three real speakers permanently unavailable.
+
+    We only ever learned a client id by holding a speaker, so a speaker another
+    server had was unidentifiable: it matched no source, showed no stream, and
+    read as unavailable forever. The mesh knows the address it dials each
+    speaker on, which closes the loop.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    payload["units"][0]["sources"][0]["streaming"] = True
+    payload["units"][0]["players"] = [
+        {
+            "player_id": CLIENT_ID,
+            "name": "Satellite1",
+            "url": PLAYER_URL,
+            "connected": True,
+            "volume": 100,
+        }
+    ]
+
+    # Nothing has ever connected to us, so our own registry knows nothing.
+    fake_server.client_ids_by_url.clear()
+    fake_server.clients_by_id.clear()
+    entry, _assign = await setup_with_mesh(hass, fake_server, payload)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state == "playing"
+    assert state.attributes["source"] == "Plum Amp100 / 204 AP"
+    assert (
+        state.attributes["supported_features"] & MediaPlayerEntityFeature.SELECT_SOURCE
+    )
+    # And the id is remembered, so it survives the mesh going away.
+    assert entry.runtime_data.memo.client_id(PLAYER_URL) == CLIENT_ID

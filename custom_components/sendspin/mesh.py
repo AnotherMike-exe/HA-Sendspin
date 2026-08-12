@@ -87,6 +87,10 @@ class MeshPlayer:
     player_id: str
     unit_host: str
     name: str
+    url: str | None = None
+    """Where the speaker listens. This is the bridge between the mesh's view
+    of a speaker and ours: it lets us learn a speaker's client id without ever
+    having held it, which we otherwise could not do."""
     connected: bool = False
     volume: int | None = None
     muted: bool | None = None
@@ -106,6 +110,17 @@ class MeshView:
     def source_by_label(self, label: str) -> MeshSource | None:
         """Look a source up by the label shown to the user."""
         return next((s for s in self.sources if s.label == label), None)
+
+    def player_by_url(self, url: str | None) -> MeshPlayer | None:
+        """A speaker matched by the address we dial it on.
+
+        The only way to identify a speaker we have never held: its client id is
+        a MAC or an opaque id we would otherwise only see during our own
+        handshake, and a speaker another server holds never handshakes with us.
+        """
+        if url is None:
+            return None
+        return next((p for p in self.players if p.url == url), None)
 
     def player_by_id(self, client_id: str | None) -> MeshPlayer | None:
         """A speaker as its holding unit reports it, if a unit holds it."""
@@ -183,12 +198,29 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     player_id=player_id,
                     unit_host=unit_host,
                     name=player.get("name") or player_id,
+                    url=player.get("url"),
                     connected=_as_bool(player.get("connected"), True),
                     # What the speaker last *reported*, not what was commanded.
                     volume=player.get("volume"),
                     muted=player.get("muted"),
                 )
             )
+        # A unit's own speaker is reported separately and is absent from
+        # `players` whenever another server holds it — which is exactly when we
+        # most need its identity, since we cannot learn it by holding it.
+        local = unit.get("local_player") or {}
+        local_id = local.get("player_id")
+        if local_id and not any(p.player_id == local_id for p in players):
+            players.append(
+                MeshPlayer(
+                    player_id=local_id,
+                    unit_host=unit_host,
+                    name=local.get("name") or local_id,
+                    url=local.get("url"),
+                    connected=_as_bool(local.get("attached"), False),
+                )
+            )
+
     return MeshView(sources=tuple(sources), players=tuple(players), reachable=True)
 
 

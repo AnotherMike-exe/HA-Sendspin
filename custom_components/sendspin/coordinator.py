@@ -243,7 +243,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if not self.memo.routed_away(frozen_url):
                 self._strand_checks.pop(frozen_url, None)
                 continue
-            client_id = self.memo.client_id(frozen_url)
+            client_id = self._client_id_for(frozen_url, self.memo.dial_url(frozen_url))
             if client_id is None:
                 # We have never seen this speaker attach, so we cannot tell
                 # whether a unit has it. Assuming the worst would take it off
@@ -373,6 +373,27 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
 
+    def _client_id_for(self, frozen_url: str, dial_url: str) -> str | None:
+        """Identify a speaker, in descending order of directness.
+
+        The mesh lookup is what makes a speaker we have never held usable at
+        all: its client id is a MAC or an opaque id only visible during a
+        handshake with *us*, and a speaker another server holds never
+        handshakes with us. Without this such a speaker matches no source, so
+        it reports no stream, offers no controls, and reads as unavailable —
+        despite being present and very likely playing.
+        """
+        if (client_id := self.host.client_id_for_url(dial_url)) is not None:
+            return client_id
+        if (known := self._mesh_view.player_by_url(dial_url)) is not None:
+            if self.memo.client_id(frozen_url) != known.player_id:
+                self.memo.remember_handshake(
+                    frozen_url, name=None, client_id=known.player_id
+                )
+                self.memo.async_schedule_save()
+            return known.player_id
+        return self.memo.client_id(frozen_url)
+
     def _frozen_url_for_dial(self, dial_url: str) -> str | None:
         """Resolve a live dial URL back to the endpoint's frozen identity."""
         for frozen_url in self._endpoints:
@@ -387,9 +408,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
         for frozen_url in self._endpoints:
             dial_url = self.memo.dial_url(frozen_url)
-            client_id = self.host.client_id_for_url(dial_url) or self.memo.client_id(
-                frozen_url
-            )
+            client_id = self._client_id_for(frozen_url, dial_url)
             client = (
                 self.host.server.get_client(client_id)
                 if client_id is not None

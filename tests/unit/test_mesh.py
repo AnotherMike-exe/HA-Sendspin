@@ -127,3 +127,69 @@ def test_an_unreachable_mesh_is_not_an_empty_mesh() -> None:
 
     assert unreachable.reachable is False
     assert unreachable.sources == ()
+
+
+def test_a_speaker_can_be_identified_without_ever_holding_it() -> None:
+    """The mesh reports the address it dials each speaker on.
+
+    This is the only way to identify a speaker another server holds: its client
+    id is a MAC or an opaque id visible only during a handshake with *us*, and
+    a speaker someone else holds never handshakes with us. Without this it
+    matches no source, so it reports no stream, offers no controls, and reads
+    as unavailable while being present and probably playing.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["players"] = [
+        {
+            "player_id": "08:B6:1F:B7:AF:5C",
+            "name": "esparagus-hifi-1",
+            "url": "ws://192.168.7.201:8928/sendspin",
+            "connected": True,
+            "volume": 100,
+        }
+    ]
+
+    view = parse_view(payload)
+    found = view.player_by_url("ws://192.168.7.201:8928/sendspin")
+
+    assert found.player_id == "08:B6:1F:B7:AF:5C"
+    assert view.player_by_url("ws://192.168.7.99:8928/sendspin") is None
+    assert view.player_by_url(None) is None
+
+
+def test_a_units_own_speaker_is_identifiable_even_on_a_foreign_server() -> None:
+    """`local_player` is the only record of a unit's own speaker when another
+    server has taken it — and that is exactly when we need its identity.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["players"] = []
+    payload["units"][0]["local_player"] = {
+        "player_id": "player-7204",
+        "name": "Plum Amp100",
+        "url": "ws://192.168.7.204:8928/sendspin",
+        "attached": True,
+        "server_name": "Music Assistant",
+    }
+
+    view = parse_view(payload)
+    found = view.player_by_url("ws://192.168.7.204:8928/sendspin")
+
+    assert found is not None
+    assert found.player_id == "player-7204"
+
+
+def test_a_units_own_speaker_is_not_listed_twice() -> None:
+    """It appears in both lists when the unit itself holds it."""
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["players"] = [
+        {"player_id": "player-7204", "url": "ws://192.168.7.204:8928/sendspin"}
+    ]
+    payload["units"][0]["local_player"] = {
+        "player_id": "player-7204",
+        "url": "ws://192.168.7.204:8928/sendspin",
+        "attached": True,
+    }
+
+    view = parse_view(payload)
+
+    assert len([p for p in view.players if p.player_id == "player-7204"]) == 1
