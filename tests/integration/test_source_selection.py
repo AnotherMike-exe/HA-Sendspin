@@ -362,6 +362,7 @@ async def test_volume_works_while_a_unit_holds_the_speaker(
         {
             "player_id": CLIENT_ID,
             "name": "Satellite1",
+            "url": PLAYER_URL,
             "connected": True,
             "volume": 35,
             "muted": False,
@@ -534,3 +535,56 @@ async def test_a_speaker_we_have_never_held_is_still_usable(
     )
     # And the id is remembered, so it survives the mesh going away.
     assert entry.runtime_data.memo.client_id(PLAYER_URL) == CLIENT_ID
+
+
+async def test_a_speaker_on_another_server_can_still_be_routed(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The core promise: move a speaker between servers.
+
+    A speaker Music Assistant holds is on no Plum source and is not held by us,
+    but it is still routable — the unit does the dialling, and a player always
+    yields to the newest dialer. Marking it unavailable took away the one
+    control that actually works on it.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["players"] = []
+    payload["units"][0]["local_player"] = {
+        "player_id": "player-7204",
+        "name": "Plum Amp100",
+        "url": PLAYER_URL,
+        "attached": True,
+        "server_name": "Music Assistant",
+    }
+    fake_server.client_ids_by_url.clear()
+    fake_server.clients_by_id.clear()
+    await setup_with_mesh(hass, fake_server, payload)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state != "unavailable"
+    # And it says who has it, so "on no stream" is explicable.
+    assert state.attributes["held_by"] == "Music Assistant"
+    assert (
+        state.attributes["supported_features"] & MediaPlayerEntityFeature.SELECT_SOURCE
+    )
+
+    assign = AsyncMock()
+    with (
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+            return_value=parse_view(payload),
+        ),
+        patch("custom_components.sendspin.mesh.MeshClient.async_assign", assign),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Plum Amp100 / 204 AP"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    assign.assert_awaited_once()
+    target, url = assign.await_args.args
+    assert target.unit_id == "unit-7204"
+    assert url == PLAYER_URL

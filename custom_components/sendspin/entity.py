@@ -57,8 +57,14 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
         return super().available and (
             endpoint.connected
             or endpoint.yielded_reason is not None
-            # The mesh can see it sitting on a stream. Not holding a speaker is
-            # not the same as having lost it — and it is the normal state after
-            # the user routes it to another unit.
+            # The mesh can see it sitting on a stream. Not holding a speaker
+            # is not the same as having lost it — and it is the normal state
+            # after the user routes it to another unit.
             or endpoint.source_label is not None
+            # Or the mesh can see the speaker at all, in which case we can
+            # still route it: the unit does the dialling, not us. This is the
+            # whole point — a speaker on Music Assistant can be moved onto a
+            # Plum stream, and back. Marking it unavailable would take away the
+            # one control that works on it.
+            or endpoint.known_to_mesh
         )

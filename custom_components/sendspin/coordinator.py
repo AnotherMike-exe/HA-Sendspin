@@ -419,12 +419,15 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             volume: int | None = None
             muted: bool | None = None
             held_by: str | None = None
+            mesh_player = self._mesh_view.player_by_url(dial_url)
             if connected and (role := player_role(client)) is not None:
                 volume = role.get_player_volume()
                 muted = role.get_player_muted()
-            elif (held := self._mesh_view.player_by_id(client_id)) is not None:
+            elif mesh_player is not None:
                 # A unit holds it, and reports what the speaker last told it.
-                volume, muted, held_by = held.volume, held.muted, held.unit_host
+                volume = mesh_player.volume
+                muted = mesh_player.muted
+                held_by = mesh_player.unit_host
 
             assigned = self._mesh_view.source_for_player(client_id)
 
@@ -440,6 +443,10 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 source_label=assigned.label if assigned is not None else None,
                 source_streaming=assigned.streaming if assigned is not None else False,
                 held_by_unit_host=held_by,
+                known_to_mesh=mesh_player is not None,
+                held_by_server=(
+                    mesh_player.held_by if mesh_player is not None else None
+                ),
                 routed_away=self.memo.routed_away(frozen_url),
             )
 

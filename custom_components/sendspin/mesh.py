@@ -91,6 +91,9 @@ class MeshPlayer:
     """Where the speaker listens. This is the bridge between the mesh's view
     of a speaker and ours: it lets us learn a speaker's client id without ever
     having held it, which we otherwise could not do."""
+    held_by: str | None = None
+    """Name of the server currently holding this speaker — another Sendspin
+    server entirely, for a unit's own speaker that something else has taken."""
     connected: bool = False
     volume: int | None = None
     muted: bool | None = None
@@ -199,6 +202,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     unit_host=unit_host,
                     name=player.get("name") or player_id,
                     url=player.get("url"),
+                    held_by=unit_name,
                     connected=_as_bool(player.get("connected"), True),
                     # What the speaker last *reported*, not what was commanded.
                     volume=player.get("volume"),
@@ -217,6 +221,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     unit_host=unit_host,
                     name=local.get("name") or local_id,
                     url=local.get("url"),
+                    held_by=local.get("server_name"),
                     connected=_as_bool(local.get("attached"), False),
                 )
             )

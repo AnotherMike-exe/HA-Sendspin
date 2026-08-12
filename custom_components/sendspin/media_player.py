@@ -207,7 +207,12 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
                 if endpoint.source_streaming
                 else MediaPlayerState.IDLE
             )
-        if endpoint.connected or endpoint.yielded_reason is not None:
+        if (
+            endpoint.connected
+            or endpoint.yielded_reason is not None
+            or endpoint.known_to_mesh
+        ):
+            # Present, just not on a stream — or on another server entirely.
             return MediaPlayerState.IDLE
         return MediaPlayerState.OFF
 
@@ -245,6 +250,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             attributes["yielded_to"] = endpoint.yielded_reason
         if endpoint.routed_away:
             attributes["routed_away"] = "true"
+        if endpoint.held_by_server is not None and not endpoint.connected:
+            # Which server has it, so "not on a stream" is explicable rather
+            # than mysterious.
+            attributes["held_by"] = endpoint.held_by_server
         return attributes or None
 
     async def async_set_volume_level(self, volume: float) -> None:

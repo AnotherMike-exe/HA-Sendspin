@@ -57,6 +57,15 @@ class EndpointSnapshot:
     """Audio is actually flowing on the assigned stream. We can know this even
     when another server holds the speaker, because it comes from the mesh."""
 
+    known_to_mesh: bool = False
+    """The mesh can see this speaker, so it can be routed even though we are
+    not holding it. Routing goes through the unit, not through us — which is
+    the entire point: a speaker on Music Assistant can be moved to a Plum
+    stream, and back again."""
+
+    held_by_server: str | None = None
+    """Whatever currently holds the speaker, for the user's benefit."""
+
     held_by_unit_host: str | None = None
     """The Plum unit currently holding this speaker, if any. Volume has to be
     commanded through whoever holds the connection."""
