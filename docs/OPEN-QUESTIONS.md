@@ -325,6 +325,47 @@ Because the group id moves whenever *anything* re-routes the speaker, this is
 also how a change made from Music Assistant or the Plum GUI becomes visible here,
 and how a return to none is detected rather than sticking.
 
+**Confirmed with a speaker actually routed, 2026-08-12.** `player-7204` on
+`unit-7204` was put on `unit-7122`'s AirPlay source:
+
+```
+unit-7122 airplay-1 'VLAN7 AirPlay' active=True streaming=True
+                    group=8cdd79b4-… players=['player-7204']
+unit-7204 local_player player-7204 group=8cdd79b4-… held='Plum RackPi'
+```
+
+Two things this settles:
+
+- **A remote holder reports the holding server's group id**, not one of its own.
+  This was the open risk — group matching would otherwise have worked only for
+  locally-held speakers.
+- **`player_ids` *does* populate once a speaker is assigned.** It reads `[]` only
+  because an unrouted speaker is in no membership list. So both branches of the
+  match agree, and keeping the direct one first costs nothing.
+
+### AirPlay carries no metadata into the Sendspin group
+
+A speaker on a live AirPlay source showed transport and state but no title,
+artist or cover art. The controller link is attached correctly — it is on
+`unit-7122:airplay-1`, group `8cdd79b4-…`, `state=playing`, with the artwork role
+negotiated and `stream/start` sent — and the metadata arriving on that group is
+all-null. Nothing is being dropped on our side; there is nothing there.
+
+Probed one hop further back: Music Assistant, which was feeding that AirPlay
+input, reports all-null metadata on its *own* Sendspin server too, and its only
+group reads `stopped`. It is not playing to a Sendspin group at all — the audio
+path is MA → AirPlay sender → Plum's AirPlay receiver → Plum's Sendspin group.
+
+Plum demonstrably *can* carry metadata on an AirPlay source: an earlier capture
+of `unit-7204:airplay-1` served `title='Imaginary Friends', artist='deadmau5'`.
+So the gap is one of the two hops, and which one is worth knowing:
+
+- if a **direct** AirPlay sender (phone, Mac) into the same source produces
+  metadata, then MA's AirPlay output is not sending DAAP metadata, and this is
+  not fixable from either this repo or Plum;
+- if it does not, Plum's AirPlay receiver is not mapping RAOP metadata onto the
+  Sendspin metadata role, which is a Plum-side fix.
+
 
 ---
 
