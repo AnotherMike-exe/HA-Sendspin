@@ -97,6 +97,10 @@ class SendspinData:
     it is currently connected — a speaker that drops off must go unavailable,
     not vanish."""
 
+    servers: tuple[tuple[str, str], ...] = ()
+    """(server_id, name) of other Sendspin servers we can see. A speaker can be
+    handed to one of these, which is how it gets back to Music Assistant."""
+
     sources: tuple[MeshSource, ...] = ()
     """Streams available right now, rebuilt on every mesh poll. Empty with no
     Plum mesh on the network, which is a legitimate state rather than an

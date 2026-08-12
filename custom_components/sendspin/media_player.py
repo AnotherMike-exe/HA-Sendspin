@@ -138,20 +138,33 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         Assigning a speaker and then starting the music is a normal workflow,
         and on a real mesh everything reads inactive most of the time.
         """
-        sources = self.coordinator.data.sources
-        if not sources:
+        data = self.coordinator.data
+        if not data.sources and not data.servers:
             return None
-        return [SOURCE_NONE, *(source.label for source in sources)]
+        # Other Sendspin servers are offered alongside streams, because handing
+        # a speaker back to Music Assistant is exactly as much a routing choice
+        # as putting it on a unit's input — and there was previously no way to
+        # express it at all.
+        return [
+            SOURCE_NONE,
+            *(name for _server_id, name in data.servers),
+            *(source.label for source in data.sources),
+        ]
 
     @property
     def source(self) -> str | None:
         """The stream this speaker is on, or None for nothing."""
         endpoint = self.endpoint
-        if endpoint is None or not self.coordinator.data.sources:
-            # No mesh, so no notion of sources at all. Reporting "None" here
-            # would show a selection against a dropdown that does not exist.
+        data = self.coordinator.data
+        if endpoint is None or (not data.sources and not data.servers):
+            # Nothing to select between, so reporting a selection would show it
+            # against a dropdown that does not exist.
             return None
-        return endpoint.source_label or SOURCE_NONE
+        if endpoint.source_label is not None:
+            return endpoint.source_label
+        # Held by another server rather than on one of our streams. Saying so
+        # is the honest answer; "None" read as "not routed anywhere".
+        return endpoint.held_by_server or SOURCE_NONE
 
     async def async_select_source(self, source: str) -> None:
         """Assign this speaker to a stream, or take it off one.
@@ -180,6 +193,20 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             memo.set_routed_away(self._frozen_url, False)
             memo.async_schedule_save()
             await self.coordinator.host.async_adopt(endpoint.dial_url)
+        elif source in {name for _server_id, name in self.coordinator.data.servers}:
+            # Hand it to another server. There is no protocol verb for "give
+            # this speaker to that server", so we stop holding it and let that
+            # server's own dialling take it — which is how it got there before.
+            if current is not None:
+                await self._call_mesh(
+                    self.coordinator.mesh.async_unassign(
+                        current, endpoint.dial_url, endpoint.client_id
+                    )
+                )
+            memo.set_routed_away(self._frozen_url, True)
+            memo.async_schedule_save()
+            self.coordinator.async_note_routing(self._frozen_url)
+            await self.coordinator.host.async_release(endpoint.dial_url)
         else:
             target = self.coordinator.mesh_view.source_by_label(source)
             if target is None:

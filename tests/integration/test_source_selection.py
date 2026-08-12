@@ -783,3 +783,94 @@ async def test_one_server_on_two_addresses_is_not_two_candidates(
     )
 
     assert hass.states.get(entity_id(hass)).attributes["media_title"] == "I Remember"
+
+
+async def test_two_servers_playing_the_same_track_is_not_ambiguous(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """One server feeding another puts the same audio on both.
+
+    Music Assistant into a unit's AirPlay input means both report the same
+    track. Treating that as two competing answers made now-playing blink out
+    whenever their states drifted in and out of step.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+
+    for host, server_id in (("192.168.7.226", "ma"), ("192.168.7.204", "unit-7204")):
+        await observe_server(
+            hass,
+            entry,
+            host,
+            ControllerSnapshot(
+                connected=True,
+                playback_state="playing",
+                title="There Might Be Coffee",
+                artist="Bell Orchestre",
+                server_id=server_id,
+                server_name=server_id,
+            ),
+        )
+
+    assert (
+        hass.states.get(entity_id(hass)).attributes["media_title"]
+        == "There Might Be Coffee"
+    )
+
+
+async def test_another_server_is_offered_as_a_source(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Handing a speaker back to Music Assistant is a routing choice too.
+
+    Previously the dropdown listed only this mesh's streams, so there was no
+    way to express it at all — and a speaker Music Assistant held reported
+    "None", which read as "not routed anywhere".
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+
+    options = hass.states.get(entity_id(hass)).attributes["source_list"]
+    assert "Music Assistant" in options
+    assert "Plum Amp100 / 204 AP" in options
+
+    # Choosing it stops us holding the speaker, so that server can take it.
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(FIXTURE),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Music Assistant"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    assert fake_server.live_dial_urls == set()
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True

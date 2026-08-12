@@ -114,6 +114,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         self._strand_checks: dict[str, int] = {}
         self._links: dict[str, LegacyControllerClient] = {}
         self._routed_at: dict[str, float] = {}
+        self._redundant_hosts: set[str] = set()
         self._stopped = False
         self._debouncer = Debouncer(
             hass,
@@ -165,6 +166,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # all. Such a server exposes no mesh API, so the only way to learn
             # what it is playing is to observe it directly.
             for host in self._candidate_servers():
+                if host in self._redundant_hosts:
+                    continue  # a second address for a server we already reach
                 wanted[f"server:{host}"] = host
 
         for key in list(self._links):
@@ -476,6 +479,10 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 kept,
                 server_id,
             )
+            # Remember it, or the next sync recreates what this just closed and
+            # the two fight forever, reopening a socket every poll.
+            if key.startswith("server:"):
+                self._redundant_hosts.add(key.removeprefix("server:"))
             self.hass.async_create_task(
                 self._links.pop(key).async_stop(), "sendspin-link-dedupe"
             )
@@ -509,6 +516,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         # an IPv4 and an IPv6 address yields two links to the same place, and
         # two links reporting the same track is not two candidates.
         playing: dict[str, str] = {}
+        titles: set[tuple[str | None, str | None]] = set()
         for key, link in self._links.items():
             snapshot = link.snapshot
             if (
@@ -517,7 +525,15 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 and snapshot.playback_state == "playing"
             ):
                 playing.setdefault(snapshot.server_id or key, key)
-        return next(iter(playing.values())) if len(playing) == 1 else None
+                titles.add((snapshot.title, snapshot.artist))
+        if not playing:
+            return None
+        # One server feeding another — Music Assistant into a unit's AirPlay
+        # input, say — puts the same audio on two servers, which is not two
+        # different answers. Only genuinely different tracks are ambiguous.
+        if len(playing) > 1 and len(titles) > 1:
+            return None
+        return next(iter(playing.values()))
 
     def is_connected(self, frozen_url: str) -> bool:
         """Whether we currently hold this endpoint."""
@@ -657,6 +673,14 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 routed_away=self.memo.routed_away(frozen_url),
             )
 
+        servers: dict[str, str] = {}
+        for link in self._links.values():
+            snapshot = link.snapshot
+            if snapshot.connected and snapshot.server_id and snapshot.server_name:
+                servers.setdefault(snapshot.server_id, snapshot.server_name)
+
         return SendspinData(
-            endpoints=endpoints, sources=tuple(self._mesh_view.sorted_sources)
+            endpoints=endpoints,
+            sources=tuple(self._mesh_view.sorted_sources),
+            servers=tuple(sorted(servers.items(), key=lambda kv: kv[1].lower())),
         )
