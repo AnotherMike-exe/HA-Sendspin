@@ -374,8 +374,17 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         handed to a server with no mesh API — Music Assistant — is on no source
         by definition and permanently, so treating that as stranded re-adopted
         it about every fifteen seconds, yanking it straight back off the server
-        the user had just chosen and re-arming the tug-of-war. The holder is
-        checked first, and a speaker something else is holding is left alone.
+        the user had just chosen and re-arming the tug-of-war.
+
+        So the question asked is **who holds this speaker**, not what stream it is
+        on. The mesh answers that for any speaker it can see, even one held by a
+        server it knows nothing else about. Held by something → left alone. Held
+        by nothing → genuinely stranded, and taken back.
+
+        The one case that cannot be answered is a speaker in *no* mesh view that
+        was handed to a server: a server quietly holding it looks exactly like
+        nothing holding it. There the user's intent is assumed to have worked,
+        because guessing the other way is the destructive one.
 
         Confirmation is required over several polls, because immediately after
         a routing call the mesh has not caught up yet and would look exactly
@@ -391,16 +400,6 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if not self.memo.routed_away(frozen_url):
                 self._strand_checks.pop(frozen_url, None)
                 continue
-            if (server := self.memo.handed_to_server(frozen_url)) is not None:
-                # Handed to a whole server, which the mesh cannot confirm or
-                # deny. Only the user can undo this, by selecting another source.
-                _LOGGER.debug(
-                    "Sendspin endpoint %s was handed to %s; leaving it there",
-                    frozen_url,
-                    server,
-                )
-                self._strand_checks.pop(frozen_url, None)
-                continue
             dial_url = self.memo.dial_url(frozen_url)
             if (holder := self._held_by_someone_else(dial_url)) is not None:
                 # Someone has it. That is a successful hand-off, whether or not
@@ -409,6 +408,24 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                     "Sendspin endpoint %s is held by %s; not taking it back",
                     frozen_url,
                     holder,
+                )
+                self._strand_checks.pop(frozen_url, None)
+                continue
+            handed_to = self.memo.handed_to_server(frozen_url)
+            if (
+                handed_to is not None
+                and self._mesh_view.player_by_url(dial_url) is None
+            ):
+                # Handed to a whole server, and the mesh cannot see this speaker
+                # at all — so there is no way to tell a server quietly holding it
+                # from nothing holding it. Assume the user got what they asked
+                # for; guessing wrong the other way takes the speaker back off a
+                # server that has it, every few seconds, forever.
+                _LOGGER.debug(
+                    "Sendspin endpoint %s was handed to %s and is not in any mesh "
+                    "view; leaving it there",
+                    frozen_url,
+                    handed_to,
                 )
                 self._strand_checks.pop(frozen_url, None)
                 continue
@@ -428,10 +445,25 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if misses < _STRAND_CONFIRMATIONS:
                 continue
 
-            _LOGGER.info(
-                "Sendspin endpoint %s is on no stream any more; taking it back",
-                frozen_url,
-            )
+            if handed_to is not None:
+                # Sendspin has no "give this speaker to that server" verb. All we
+                # can do is stop holding it and let the target dial — and a
+                # server only dials a player when it wants to play to it, so the
+                # hand-off simply may not happen. Say so, rather than leaving the
+                # speaker held by nothing and silent with no explanation.
+                _LOGGER.warning(
+                    "%s did not take Sendspin endpoint %s, and nothing else holds "
+                    "it, so Home Assistant is taking it back. Start playback to "
+                    "that speaker from %s to hand it over",
+                    handed_to,
+                    frozen_url,
+                    handed_to,
+                )
+            else:
+                _LOGGER.info(
+                    "Sendspin endpoint %s is on no stream any more; taking it back",
+                    frozen_url,
+                )
             self._strand_checks.pop(frozen_url, None)
             self._routed_at.pop(frozen_url, None)
             self.memo.set_routed_away(frozen_url, False)

@@ -1226,6 +1226,131 @@ async def test_a_speaker_handed_to_a_server_is_not_taken_back(
     assert memo.routed_away(PLAYER_URL) is True
 
 
+async def test_a_server_handoff_that_never_lands_is_taken_back(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Observed live: Music Assistant did not take the speaker at all.
+
+    Sendspin has no "give this speaker to that server" verb — we stop holding it
+    and the target dials, if it wants to. Music Assistant only dials a player it
+    intends to play to, so the hand-off can simply not happen, leaving the speaker
+    held by nothing and silent. The mesh could see that (`attached: false`, no
+    server), so it is recoverable and must be recovered.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    # A mesh that can see our speaker, and reports nothing holding it.
+    seen = json.loads(json.dumps(FIXTURE))
+    seen["units"][0]["local_player"] = {
+        "player_id": CLIENT_ID,
+        "name": "Satellite1",
+        "url": PLAYER_URL,
+        "attached": False,
+    }
+    entry, _assign = await setup_with_mesh(hass, fake_server, seen)
+    coordinator = entry.runtime_data.coordinator
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(seen),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Music Assistant"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    memo = entry.runtime_data.memo
+    assert memo.handed_to_server(PLAYER_URL) == "Music Assistant"
+
+    coordinator._routed_at.clear()
+    with no_real_links():
+        for _ in range(_STRAND_CONFIRMATIONS + 1):
+            await repoll(hass, entry, seen)
+
+    # Nothing took it, so we have it back rather than leaving it orphaned.
+    assert memo.routed_away(PLAYER_URL) is False
+    assert memo.handed_to_server(PLAYER_URL) is None
+    assert PLAYER_URL in fake_server.live_dial_urls
+
+
+async def test_a_server_that_did_take_the_speaker_keeps_it(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The other half: a hand-off that worked must not be undone.
+
+    Music Assistant publishes no mesh API, so its speakers are on no mesh source
+    ever — but the mesh still names it as the holder, and that is the signal.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    held = json.loads(json.dumps(FIXTURE))
+    held["units"][0]["local_player"] = {
+        "player_id": CLIENT_ID,
+        "name": "Satellite1",
+        "url": PLAYER_URL,
+        "attached": True,
+        "server_id": "ma",
+        "server_name": "Music Assistant",
+    }
+    entry, _assign = await setup_with_mesh(hass, fake_server, held)
+    coordinator = entry.runtime_data.coordinator
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+    # Hand it over for real, so the dial is released the way production does.
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(held),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Music Assistant"},
+            blocking=True,
+        )
+        await flush(hass)
+    # Music Assistant holding it means our own socket is gone; the fake server
+    # does not drop it on release, so say so explicitly.
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+    await flush(hass)
+
+    coordinator._routed_at.clear()
+    with no_real_links():
+        for _ in range(_STRAND_CONFIRMATIONS + 2):
+            await repoll(hass, entry, held)
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+    assert PLAYER_URL not in fake_server.live_dial_urls
+    assert hass.states.get(entity_id(hass)).attributes["source"] == "Music Assistant"
+
+
 async def test_a_failed_stream_handoff_is_still_rescued(
     hass: HomeAssistant, fake_server: FakeSendspinServer
 ) -> None:
