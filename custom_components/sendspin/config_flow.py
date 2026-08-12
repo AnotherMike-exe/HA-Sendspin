@@ -141,6 +141,7 @@ class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if found.kind == "player":
             async_remember_discovery(self.hass, found)
+            self._async_relocate_if_known(found)
         else:
             async_mesh_hosts(self.hass).add(found.host)
             for entry in self._async_current_entries():
@@ -157,6 +158,34 @@ class SendspinConfigFlow(ConfigFlow, domain=DOMAIN):
             "name": found.txt_name or found.instance_name
         }
         return await self.async_step_zeroconf_confirm()
+
+    @callback
+    def _async_relocate_if_known(self, found: SendspinDiscovery) -> None:
+        """Follow an already-adopted speaker to a new address.
+
+        A speaker's identity is its listener URL as first seen, so a new DHCP
+        lease produces a record that looks like a brand new device. The mDNS
+        instance name is the secondary matcher that ties the two together: it
+        survives an address change, and survives a rename too, because a rename
+        only alters the TXT `name`.
+        """
+        for entry in self._async_current_entries():
+            runtime = getattr(entry, "runtime_data", None)
+            if runtime is None:
+                continue
+            memo = runtime.memo
+            frozen_url = memo.frozen_url_for_instance(found.instance_name)
+            if frozen_url is None or frozen_url == found.listener_url:
+                continue
+            previous = memo.dial_url(frozen_url)
+            if previous == found.listener_url:
+                continue
+            _LOGGER.info(
+                "Sendspin endpoint %s has moved to %s", frozen_url, found.listener_url
+            )
+            memo.remember_dial_url(frozen_url, found.listener_url)
+            memo.async_schedule_save()
+            runtime.coordinator.async_relocate_endpoint(frozen_url, previous)
 
     async def async_step_zeroconf_confirm(
         self, user_input: dict[str, Any] | None = None

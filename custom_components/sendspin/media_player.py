@@ -126,7 +126,9 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     def source(self) -> str | None:
         """The stream this speaker is on, or None for nothing."""
         endpoint = self.endpoint
-        if endpoint is None:
+        if endpoint is None or not self.coordinator.data.sources:
+            # No mesh, so no notion of sources at all. Reporting "None" here
+            # would show a selection against a dropdown that does not exist.
             return None
         return endpoint.source_label or SOURCE_NONE
 
@@ -171,6 +173,7 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             # the speaker and takes it straight back off the stream.
             memo.set_routed_away(self._frozen_url, True)
             memo.async_schedule_save()
+            self.coordinator.async_note_routing(self._frozen_url)
             await self._call_mesh(
                 self.coordinator.mesh.async_assign(target, endpoint.dial_url)
             )

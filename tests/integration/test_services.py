@@ -258,3 +258,24 @@ async def test_diagnostics_never_leak_the_private_key(
     assert dump["server"]["server_id"] == identity.peer_id
     assert dump["server"]["advertises_mdns"] is False
     assert [e["frozen_url"] for e in dump["endpoints"]] == [PLAYER_URL]
+
+
+async def test_removing_a_device_lets_it_be_adopted_again(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A speaker handed to another unit, then deleted, must still re-adopt.
+
+    The routed-away flag suppresses dialling and lives in the memo, which
+    outlives the subentry. Left set, re-adopting the speaker would silently
+    never dial it.
+    """
+    from custom_components.sendspin import async_remove_config_entry_device
+
+    entry = await setup_hub(hass, fake_server, adopted=True)
+    entry.runtime_data.memo.set_routed_away(PLAYER_URL, True)
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
+
+    await async_remove_config_entry_device(hass, entry, device)
+    await hass.async_block_till_done()
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is False

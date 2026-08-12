@@ -146,6 +146,12 @@ async def async_remove_config_entry_device(
             subentry.subentry_type == SUBENTRY_TYPE_PLAYER
             and subentry.data.get(CONF_LISTENER_URL) in frozen_urls
         ):
+            # Clear the routed-away flag, or re-adopting this speaker later
+            # would silently never dial it. The name is deliberately kept: it
+            # is hard-won and still correct.
+            entry.runtime_data.memo.set_routed_away(
+                subentry.data[CONF_LISTENER_URL], False
+            )
             hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
     return True
 

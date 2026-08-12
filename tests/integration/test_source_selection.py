@@ -456,3 +456,43 @@ async def test_a_speaker_still_on_its_stream_is_left_alone(
 
     assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
     assert fake_server.dial_calls == []
+
+
+async def test_the_rescue_holds_off_right_after_a_routing_call(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A working hand-off looks exactly like a failed one for a few seconds.
+
+    Plum aggregates peer state on a 2s loop and we poll on a 5s one, so without
+    a grace period the rescue can take a speaker straight back off the stream
+    the user just put it on.
+    """
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    entry.runtime_data.memo.remember_handshake(
+        PLAYER_URL, name="Satellite1", client_id=CLIENT_ID
+    )
+
+    with (
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+            return_value=parse_view(FIXTURE),
+        ),
+        patch("custom_components.sendspin.mesh.MeshClient.async_assign", AsyncMock()),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Plum RackPi / VLAN7 AirPlay"},
+            blocking=True,
+        )
+        await flush(hass)
+        fake_server.dial_calls.clear()
+
+        # The mesh has not caught up: the speaker is on no source yet.
+        for _ in range(5):
+            await entry.runtime_data.coordinator.async_refresh_mesh()
+            await flush(hass)
+
+    # Still handed away, and we have not started competing for it again.
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+    assert fake_server.dial_calls == []

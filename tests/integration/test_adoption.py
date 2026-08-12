@@ -348,3 +348,49 @@ async def test_the_device_is_renamed_once_the_handshake_name_arrives(
 
     device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
     assert device.name == "FutureProofHomes - Satellite1"
+
+
+async def test_a_speaker_that_changes_address_keeps_its_entity(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A new DHCP lease must not orphan the entity or create a second one.
+
+    The identity is the listener URL as first seen, so a moved speaker
+    advertises what looks like a brand new device. The mDNS instance name ties
+    the two together — it survives an address change, and a rename too, since a
+    rename only alters the TXT name.
+    """
+    await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_ZEROCONF}, data=player_record()
+    )
+    await hass.async_block_till_done()
+    entry = await setup_hub(
+        hass,
+        fake_server,
+        subentries=[
+            {
+                "subentry_type": SUBENTRY_TYPE_PLAYER,
+                "title": "Satellite1",
+                "data": {CONF_LISTENER_URL: PLAYER_URL},
+                "unique_id": PLAYER_URL,
+            }
+        ],
+    )
+    before = set(hass.states.async_entity_ids("media_player"))
+    fake_server.dial_calls.clear()
+
+    # Same speaker, same mDNS instance, new address.
+    moved = "ws://192.168.7.99:8928/sendspin"
+    await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_ZEROCONF},
+        data=player_record(host="192.168.7.99"),
+    )
+    await hass.async_block_till_done()
+
+    memo = entry.runtime_data.memo
+    # Identity untouched; only where we dial it has changed.
+    assert memo.dial_url(PLAYER_URL) == moved
+    assert [c.url for c in fake_server.dial_calls] == [moved]
+    # And no second entity appeared for what is the same speaker.
+    assert set(hass.states.async_entity_ids("media_player")) == before

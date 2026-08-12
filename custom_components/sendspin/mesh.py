@@ -103,10 +103,6 @@ class MeshView:
     there is nothing" matters: a failed fetch must never be read as every
     stream having ended."""
 
-    def source_by_key(self, key: str) -> MeshSource | None:
-        """Look a source up by its `unit_id:source_id` key."""
-        return next((s for s in self.sources if s.key == key), None)
-
     def source_by_label(self, label: str) -> MeshSource | None:
         """Look a source up by the label shown to the user."""
         return next((s for s in self.sources if s.label == label), None)

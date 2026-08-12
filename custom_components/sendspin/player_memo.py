@@ -134,10 +134,6 @@ class PlayerMemo:
         """Whether this speaker was deliberately handed to another unit."""
         return bool(self._data.get(frozen_url, {}).get(_KEY_ROUTED_AWAY, False))
 
-    def forget(self, frozen_url: str) -> None:
-        """Drop everything about an endpoint, on un-adoption."""
-        self._data.pop(frozen_url, None)
-
     # --- Reading -----------------------------------------------------------
 
     def display_name(self, frozen_url: str) -> str:
@@ -175,10 +171,6 @@ class PlayerMemo:
             if entry.get(_KEY_INSTANCE_NAME) == instance_name:
                 return frozen_url
         return None
-
-    def known_urls(self) -> frozenset[str]:
-        """Every endpoint the memo has heard of."""
-        return frozenset(self._data)
 
     @staticmethod
     def _host_and_port(url: str) -> str:

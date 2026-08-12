@@ -59,6 +59,13 @@ _EVENT_DEBOUNCE_S = 0.2
 # back. More than one, because the mesh lags a routing call by a poll or two.
 _STRAND_CONFIRMATIONS = 3
 
+# And ignore strandedness entirely for this long after a routing call. Plum
+# aggregates peer state on a 2s loop and we poll on a 5s one, so a successful
+# hand-off looks exactly like a failed one for the first few seconds. Without
+# this the rescue can take a speaker straight back off the stream the user just
+# put it on.
+_ROUTING_GRACE_S = 45.0
+
 _INTERESTING_EVENTS = (
     ClientAddedEvent,
     ClientConnectedEvent,
@@ -103,6 +110,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         self._mesh_view = MeshView()
         self._mesh_hosts: list[str] = []
         self._strand_checks: dict[str, int] = {}
+        self._routed_at: dict[str, float] = {}
+        self._stopped = False
         self._debouncer = Debouncer(
             hass,
             _LOGGER,
@@ -121,6 +130,40 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             timedelta(seconds=MESH_POLL_INTERVAL_S),
             name="sendspin-mesh-poll",
         )
+
+    @callback
+    def async_relocate_endpoint(self, frozen_url: str, previous: str) -> None:
+        """Re-dial an endpoint that has moved to a new address.
+
+        The frozen URL is the identity and never changes; only where we dial
+        it does. Without this a speaker that gets a new DHCP lease is dialled
+        at its old address forever, goes unavailable, and shows up in the
+        adoption picker as if it were a different device.
+        """
+        if frozen_url not in self._endpoints:
+            return
+        self.hass.async_create_task(
+            self._async_relocate(frozen_url, previous),
+            f"sendspin-relocate-{frozen_url}",
+        )
+
+    async def _async_relocate(self, frozen_url: str, previous: str) -> None:
+        """Stop dialling the old address and start on the new one."""
+        if self._stopped or self.memo.routed_away(frozen_url):
+            return
+        if previous:
+            await self.host.async_release(previous)
+        await self.host.async_adopt(self.memo.dial_url(frozen_url))
+        self.async_request_publish()
+
+    @callback
+    def async_note_routing(self, frozen_url: str) -> None:
+        """Record that a routing call was just made for this endpoint.
+
+        Starts the grace period during which strandedness is not judged.
+        """
+        self._routed_at[frozen_url] = self.hass.loop.time()
+        self._strand_checks.pop(frozen_url, None)
 
     @callback
     def async_note_mesh_host(self, host: str) -> None:
@@ -157,6 +200,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         unavailable: speakers are adopted and controlled through our own
         server, which knows nothing about this API.
         """
+        if self._stopped:
+            return
         hosts = [*self._mesh_hosts]
         # Units discovered through the view itself are just as good to ask.
         hosts += [s.unit_host for s in self._mesh_view.sources if s.unit_host]
@@ -170,7 +215,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             or view.players != self._mesh_view.players
         )
         self._mesh_view = view
-        await self._async_rescue_stranded()
+        if not self._stopped:
+            await self._async_rescue_stranded()
         if changed:
             self.async_request_publish()
 
@@ -187,7 +233,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         a routing call the mesh has not caught up yet and would look exactly
         like a failure.
         """
-        for frozen_url in self._endpoints:
+        now = self.hass.loop.time()
+        for frozen_url in list(self._endpoints):
+            if self._stopped:
+                return
+            routed_at = self._routed_at.get(frozen_url)
+            if routed_at is not None and now - routed_at < _ROUTING_GRACE_S:
+                continue  # too soon to tell a working hand-off from a failed one
             if not self.memo.routed_away(frozen_url):
                 self._strand_checks.pop(frozen_url, None)
                 continue
@@ -212,6 +264,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 frozen_url,
             )
             self._strand_checks.pop(frozen_url, None)
+            self._routed_at.pop(frozen_url, None)
             self.memo.set_routed_away(frozen_url, False)
             self.memo.async_schedule_save()
             await self.host.async_adopt(self.memo.dial_url(frozen_url))
@@ -223,6 +276,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         The debouncer holds a timer, so it has to be shut down explicitly or a
         reload leaves it armed against a coordinator that is going away.
         """
+        self._stopped = True
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
@@ -245,12 +299,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         never does.
         """
         self._endpoints.discard(frozen_url)
+        self._strand_checks.pop(frozen_url, None)
+        self._routed_at.pop(frozen_url, None)
         self.async_request_publish()
-
-    @property
-    def tracked_endpoints(self) -> frozenset[str]:
-        """Frozen URLs currently reported."""
-        return frozenset(self._endpoints)
 
     @callback
     def async_request_publish(self) -> None:
