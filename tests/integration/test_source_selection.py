@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from aiosendspin.models.types import GoodbyeReason
-from aiosendspin.server.server import ClientDisconnectedEvent
+from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEvent
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -30,6 +30,7 @@ from custom_components.sendspin.const import (
     SOURCE_NONE,
     SUBENTRY_TYPE_PLAYER,
 )
+from custom_components.sendspin.coordinator import _STRAND_CONFIRMATIONS
 from custom_components.sendspin.mesh import parse_view
 from tests.fakes.fake_sendspin import FakeSendspinServer
 
@@ -67,6 +68,18 @@ async def repoll(hass: HomeAssistant, entry: MockConfigEntry, payload: dict) -> 
     ):
         await entry.runtime_data.coordinator.async_refresh_mesh()
     await flush(hass)
+
+
+def no_real_links():
+    """Keep controller links from dialling for real.
+
+    Each `flush` advances virtual time, so a test that polls several times in a
+    row reaches the links' reconnect backoff and they try to open a socket. Tests
+    here drive link state by assigning snapshots, so starting them buys nothing.
+    """
+    return patch(
+        "custom_components.sendspin.coordinator.LegacyControllerClient.async_start"
+    )
 
 
 async def flush(hass: HomeAssistant) -> None:
@@ -715,12 +728,26 @@ async def test_a_speaker_on_another_server_can_still_be_routed(
     assert url == PLAYER_URL
 
 
+class _StubLink:
+    """A link that is already connected, for asserting on filtering alone."""
+
+    def __init__(self, snapshot) -> None:
+        self.snapshot = snapshot
+        self.url = "ws://stub:8927/sendspin"
+
+    async def async_stop(self) -> None:
+        """Nothing to tear down."""
+
+
 async def observe_server(hass, entry, host: str, snapshot) -> None:
     """Let the coordinator open a link to a server, then give it a state.
 
     Built the way production does — noting the host, letting a poll create the
     link — because links are pruned to exactly the set that is wanted, so one
     injected by hand would vanish on the next poll.
+
+    The host must not be a Plum unit: no `server:` link is opened to one, since
+    a unit is observed through the `ctrl:` links its streams already need.
     """
     coordinator = entry.runtime_data.coordinator
     coordinator.async_note_mesh_host(host)
@@ -729,6 +756,10 @@ async def observe_server(hass, entry, host: str, snapshot) -> None:
         return_value=parse_view(FIXTURE),
     ):
         await coordinator.async_refresh_mesh()
+    assert f"server:{host}" in coordinator.links, (
+        f"no server link to {host}; it is a Plum unit host, or discovery of it "
+        f"did not land. Open links: {sorted(coordinator.links)}"
+    )
     coordinator._links[f"server:{host}"].snapshot = snapshot
     coordinator.async_request_publish()
     await flush(hass)
@@ -822,7 +853,7 @@ async def test_an_idle_servers_stale_title_does_not_block_attribution(
     await observe_server(
         hass,
         entry,
-        "192.168.7.204",
+        "192.168.7.240",
         ControllerSnapshot(
             connected=True, playback_state="stopped", title="Talk In Your Sleep"
         ),
@@ -899,9 +930,9 @@ async def test_one_server_on_two_addresses_is_not_two_candidates(
         connected=True,
         playback_state="playing",
         title="I Remember",
-        server_id="unit-7204",
+        server_id="ma",
     )
-    await observe_server(hass, entry, "192.168.7.204", ControllerSnapshot(**same))
+    await observe_server(hass, entry, "192.168.7.226", ControllerSnapshot(**same))
     await observe_server(
         hass, entry, "fd00:1::dea6:32ff:fe2f:8080", ControllerSnapshot(**same)
     )
@@ -914,7 +945,7 @@ async def test_two_servers_playing_the_same_track_is_not_ambiguous(
 ) -> None:
     """One server feeding another puts the same audio on both.
 
-    Music Assistant into a unit's AirPlay input means both report the same
+    Music Assistant into another server's input means both report the same
     track. Treating that as two competing answers made now-playing blink out
     whenever their states drifted in and out of step.
     """
@@ -928,7 +959,7 @@ async def test_two_servers_playing_the_same_track_is_not_ambiguous(
         )
     )
 
-    for host, server_id in (("192.168.7.226", "ma"), ("192.168.7.204", "unit-7204")):
+    for host, server_id in (("192.168.7.226", "ma"), ("192.168.7.240", "other")):
         await observe_server(
             hass,
             entry,
@@ -1065,27 +1096,177 @@ async def test_a_plum_unit_is_never_offered_as_a_server(
     from custom_components.sendspin.legacy_client import ControllerSnapshot
 
     entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
-    await observe_server(
-        hass,
-        entry,
-        "192.168.7.204",
+    coordinator = entry.runtime_data.coordinator
+
+    # The unit's host is a known Sendspin server and gets noted as such, so this
+    # is the exact path that used to produce the bare entry.
+    coordinator.async_note_mesh_host("192.168.7.204")
+    await repoll(hass, entry, FIXTURE)
+
+    # No `server:` link is opened to it at all — its streams and their `ctrl:`
+    # links are the whole of what we need from a unit.
+    assert "server:192.168.7.204" not in coordinator.links
+
+    # And were one open anyway — opened before the mesh view identified the host
+    # as a unit — it still must not become an entry.
+    coordinator._links["server:192.168.7.204"] = _StubLink(
         ControllerSnapshot(
             connected=True,
             playback_state="stopped",
             server_id="unit-7204",
             server_name="Plum Amp100",
-        ),
+        )
     )
+    coordinator.async_request_publish()
+    await flush(hass)
 
-    # The link is live and reporting a name — this is not passing by absence.
-    link = entry.runtime_data.coordinator.links["server:192.168.7.204"]
-    assert link.snapshot.connected is True
-    assert link.snapshot.server_name == "Plum Amp100"
-
-    assert entry.runtime_data.coordinator.data.servers == ()
+    assert coordinator.data.servers == ()
     assert (
         "Plum Amp100" not in hass.states.get(entity_id(hass)).attributes["source_list"]
     )
+
+
+async def test_a_foreign_server_stays_offered_while_the_speaker_is_routed(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Handing a speaker back must not stop being possible once it is routed.
+
+    `server:` links were opened per *unrouted* endpoint, so the moment a speaker
+    went onto a Plum stream every one of them closed and Music Assistant vanished
+    from the dropdown — you had to select None first to get the option back. It
+    could not be offered at all after a restart with everything already routed.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    playing = live(("unit-7204", "airplay-1"))
+    playing["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    entry, _assign = await setup_with_mesh(hass, fake_server, playing)
+    coordinator = entry.runtime_data.coordinator
+
+    # Let the handshake land, so the memo knows the client id. Production always
+    # reaches this state, and without it the speaker matches no source and the
+    # coordinator falls back to observing every candidate server — which would
+    # make this test pass for the wrong reason.
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    await flush(hass)
+    assert entry.runtime_data.memo.client_id(PLAYER_URL) == CLIENT_ID
+
+    coordinator.async_note_mesh_host("192.168.7.226")
+    await repoll(hass, entry, playing)
+    coordinator._links["server:192.168.7.226"].snapshot = ControllerSnapshot(
+        connected=True,
+        playback_state="stopped",
+        server_id="ma",
+        server_name="Music Assistant",
+    )
+    coordinator.async_request_publish()
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    # Routed onto a stream, and the hand-back option is still there.
+    assert state.attributes["source"] == "Plum Amp100 / 204 AP"
+    assert state.attributes["source_list"] == [
+        SOURCE_NONE,
+        "Music Assistant",
+        "Plum Amp100 / 204 AP",
+    ]
+
+
+async def test_a_speaker_handed_to_a_server_is_not_taken_back(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The stranded rescue must not undo a deliberate hand-off to a server.
+
+    A speaker on a server with no mesh API is on no mesh source permanently and
+    by design. The rescue read that as a failed hand-off, so ~15s after handing a
+    speaker to Music Assistant it re-adopted it, yanking it straight back and
+    re-arming the tug-of-war. Only the user can undo this now.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    coordinator = entry.runtime_data.coordinator
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(FIXTURE),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Music Assistant"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    memo = entry.runtime_data.memo
+    assert memo.routed_away(PLAYER_URL) is True
+    assert memo.handed_to_server(PLAYER_URL) == "Music Assistant"
+    assert fake_server.live_dial_urls == set()
+
+    # Well past the routing grace, and more polls than the strand threshold.
+    coordinator._routed_at.clear()
+    with no_real_links():
+        for _ in range(_STRAND_CONFIRMATIONS + 2):
+            await repoll(hass, entry, FIXTURE)
+
+    # Still handed away: we have not re-dialled it.
+    assert fake_server.live_dial_urls == set()
+    assert memo.routed_away(PLAYER_URL) is True
+
+
+async def test_a_failed_stream_handoff_is_still_rescued(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The rescue still does its job for the case it exists for.
+
+    A *stream* hand-off is verifiable — the mesh either shows the speaker on that
+    source or it does not — so a speaker left on no stream and held by nothing is
+    genuinely stranded and must be taken back.
+    """
+    entry, _assign = await setup_with_mesh(
+        hass, fake_server, live(("unit-7204", "airplay-1"))
+    )
+    coordinator = entry.runtime_data.coordinator
+
+    with (
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+            return_value=parse_view(live(("unit-7204", "airplay-1"))),
+        ),
+        patch("custom_components.sendspin.mesh.MeshClient.async_assign", AsyncMock()),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Plum Amp100 / 204 AP"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    memo = entry.runtime_data.memo
+    assert memo.routed_away(PLAYER_URL) is True
+    assert memo.handed_to_server(PLAYER_URL) is None
+
+    # The mesh never shows it on the source, and nothing else claims it.
+    coordinator._routed_at.clear()
+    with no_real_links():
+        for _ in range(_STRAND_CONFIRMATIONS + 1):
+            await repoll(hass, entry, FIXTURE)
+
+    assert memo.routed_away(PLAYER_URL) is False
+    assert PLAYER_URL in fake_server.live_dial_urls
 
 
 async def test_the_server_we_read_from_is_named_as_the_source(

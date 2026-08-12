@@ -154,6 +154,9 @@ async def async_remove_config_entry_device(
             entry.runtime_data.memo.set_routed_away(
                 subentry.data[CONF_LISTENER_URL], False
             )
+            entry.runtime_data.memo.set_handed_to_server(
+                subentry.data[CONF_LISTENER_URL], None
+            )
             hass.config_entries.async_remove_subentry(entry, subentry.subentry_id)
     return True
 

@@ -146,7 +146,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
     @callback
     def _async_sync_links(self) -> None:
-        """Observe exactly the sources our speakers are actually on.
+        """Observe the sources our speakers are on, plus any foreign server.
 
         A controller sees only the group it occupies, so reading what is
         playing needs one connection per source. Plum-Audio honours a client id
@@ -154,30 +154,45 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         source's group, which makes the target deterministic rather than
         whichever source happens to be primary.
 
-        Only sources with one of our speakers on them are observed — a link per
-        idle source would be a websocket each, for nothing.
+        Two kinds of link, wanted for different reasons:
+
+        - **`ctrl:<unit>:<source>`**, one per source a speaker of ours is on.
+          Only those — a link per idle source would be a websocket each, for
+          nothing.
+        - **`server:<host>`**, one per non-Plum Sendspin server on the network.
+          These are *not* per-endpoint. They read now-playing for a speaker held
+          by a server the mesh cannot see, and they are the only way to learn
+          such a server exists at all — which is what puts Music Assistant in
+          the source dropdown. Tying them to unrouted endpoints meant the option
+          to hand a speaker back vanished the moment it was routed anywhere, and
+          it could not be offered at all after a restart with everything routed.
+
+        Plum units are excluded from the `server:` set. Their now-playing comes
+        through `ctrl:` links, and they are already reachable in the dropdown by
+        naming their streams — so a second socket to each would buy nothing.
         """
         if self._stopped:
             return
 
         wanted: dict[str, str] = {}
+        unit_hosts = {s.unit_host for s in self._mesh_view.sources if s.unit_host}
+        for host in self._candidate_servers():
+            if host in self._redundant_hosts:
+                continue  # a second address for a server we already reach
+            if host.strip("[]") in unit_hosts:
+                continue  # a Plum unit, covered by its streams and ctrl: links
+            wanted[f"server:{host}"] = host
+
         for frozen_url in self._endpoints:
-            client_id = self.memo.client_id(frozen_url)
+            # `_client_id_for`, not `memo.client_id`: the same resolution the
+            # snapshot uses. The memo only knows an id we have persisted from a
+            # handshake, so relying on it meant a speaker we have never held
+            # matched no source here — and we opened a link to every candidate
+            # server while failing to open the `ctrl:` link its stream needed.
+            client_id = self._client_id_for(frozen_url, self.memo.dial_url(frozen_url))
             source = self._mesh_view.source_for_player(client_id)
             if source is not None and source.unit_host:
                 wanted[source.key] = source.unit_host
-                continue
-            # Held by a server that is not a Plum unit — Music Assistant, say.
-            # Its now-playing is only reachable by observing that server
-            # directly, keyed by host since it exposes no mesh API.
-            # Otherwise something we cannot see holds it — a non-Plum server,
-            # or a third-party speaker that appears in no unit's mesh view at
-            # all. Such a server exposes no mesh API, so the only way to learn
-            # what it is playing is to observe it directly.
-            for host in self._candidate_servers():
-                if host in self._redundant_hosts:
-                    continue  # a second address for a server we already reach
-                wanted[f"server:{host}"] = host
 
         for key in list(self._links):
             if key not in wanted:
@@ -330,14 +345,37 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             return False
         return self.hass.loop.time() - self._mesh_fetched_at > _MESH_LIVENESS_TTL_S
 
+    def _held_by_someone_else(self, dial_url: str) -> str | None:
+        """The name of whatever holds this speaker, if it is not us.
+
+        "On no mesh source" and "nothing has it" are different states, and
+        conflating them is what made handing a speaker to Music Assistant
+        impossible: MA publishes no mesh API, so its speakers appear on no
+        source and never will. The mesh still says who holds them, via
+        `local_player.server_id`.
+        """
+        player = self._mesh_view.player_by_url(dial_url)
+        if player is None or player.held_by_server_id is None:
+            return None
+        if player.held_by_server_id == self.host.server_id:
+            return None
+        return player.held_by or player.held_by_server_id
+
     async def _async_rescue_stranded(self) -> None:
         """Resume dialling a speaker whose hand-off did not stick.
 
-        Routing a speaker to another unit suppresses our dialling, otherwise a
-        restart would take it straight back. But if the mesh then reports the
-        speaker on no source at all, the hand-off is over — the stream ended,
-        or something else took the speaker — and leaving it suppressed strands
+        Routing a speaker away suppresses our dialling, otherwise a restart
+        would take it straight back. But if the speaker then turns out to be
+        held by nothing and on no stream, the hand-off is over — the stream
+        ended, or whatever took it has gone — and leaving it suppressed strands
         it: not held by us, not on a stream, and unavailable forever.
+
+        **Being on no mesh source is not enough to conclude that.** A speaker
+        handed to a server with no mesh API — Music Assistant — is on no source
+        by definition and permanently, so treating that as stranded re-adopted
+        it about every fifteen seconds, yanking it straight back off the server
+        the user had just chosen and re-arming the tug-of-war. The holder is
+        checked first, and a speaker something else is holding is left alone.
 
         Confirmation is required over several polls, because immediately after
         a routing call the mesh has not caught up yet and would look exactly
@@ -353,7 +391,28 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if not self.memo.routed_away(frozen_url):
                 self._strand_checks.pop(frozen_url, None)
                 continue
-            client_id = self._client_id_for(frozen_url, self.memo.dial_url(frozen_url))
+            if (server := self.memo.handed_to_server(frozen_url)) is not None:
+                # Handed to a whole server, which the mesh cannot confirm or
+                # deny. Only the user can undo this, by selecting another source.
+                _LOGGER.debug(
+                    "Sendspin endpoint %s was handed to %s; leaving it there",
+                    frozen_url,
+                    server,
+                )
+                self._strand_checks.pop(frozen_url, None)
+                continue
+            dial_url = self.memo.dial_url(frozen_url)
+            if (holder := self._held_by_someone_else(dial_url)) is not None:
+                # Someone has it. That is a successful hand-off, whether or not
+                # it is a stream we can see.
+                _LOGGER.debug(
+                    "Sendspin endpoint %s is held by %s; not taking it back",
+                    frozen_url,
+                    holder,
+                )
+                self._strand_checks.pop(frozen_url, None)
+                continue
+            client_id = self._client_id_for(frozen_url, dial_url)
             if client_id is None:
                 # We have never seen this speaker attach, so we cannot tell
                 # whether a unit has it. Assuming the worst would take it off
@@ -376,6 +435,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             self._strand_checks.pop(frozen_url, None)
             self._routed_at.pop(frozen_url, None)
             self.memo.set_routed_away(frozen_url, False)
+            self.memo.set_handed_to_server(frozen_url, None)
             self.memo.async_schedule_save()
             await self.host.async_adopt(self.memo.dial_url(frozen_url))
 

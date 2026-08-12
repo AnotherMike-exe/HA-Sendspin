@@ -215,6 +215,7 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             # Taking it off a stream means we want it back, so start holding it
             # again and stop suppressing adoption on restart.
             memo.set_routed_away(self._frozen_url, False)
+            memo.set_handed_to_server(self._frozen_url, None)
             memo.async_schedule_save()
             await self.coordinator.host.async_adopt(endpoint.dial_url)
         elif source in {name for _server_id, name in self.coordinator.data.servers}:
@@ -228,6 +229,11 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
                     )
                 )
             memo.set_routed_away(self._frozen_url, True)
+            # Remember it was a *server*, not a stream. A server hand-off cannot
+            # be verified through the mesh — the speaker is on no source by
+            # design — so the stranded rescue must not treat that as a failure
+            # and take the speaker straight back.
+            memo.set_handed_to_server(self._frozen_url, source)
             memo.async_schedule_save()
             self.coordinator.async_note_routing(self._frozen_url)
             await self.coordinator.host.async_release(endpoint.dial_url)
@@ -244,6 +250,9 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             # Remember this was deliberate. Otherwise the next restart re-dials
             # the speaker and takes it straight back off the stream.
             memo.set_routed_away(self._frozen_url, True)
+            # A stream hand-off *is* verifiable through the mesh, so the rescue
+            # stays armed for it — this is the case it exists for.
+            memo.set_handed_to_server(self._frozen_url, None)
             memo.async_schedule_save()
             self.coordinator.async_note_routing(self._frozen_url)
             await self._call_mesh(

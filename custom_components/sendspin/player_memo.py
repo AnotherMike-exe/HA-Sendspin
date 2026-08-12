@@ -47,6 +47,7 @@ _KEY_TXT_NAME = "mdns_txt_name"
 _KEY_CLIENT_ID = "client_id"
 _KEY_DIAL_URL = "dial_url"
 _KEY_ROUTED_AWAY = "routed_away"
+_KEY_HANDED_TO_SERVER = "handed_to_server"
 
 
 def _clean(value: str | None) -> str | None:
@@ -159,6 +160,28 @@ class PlayerMemo:
     def routed_away(self, frozen_url: str) -> bool:
         """Whether this speaker was deliberately handed to another unit."""
         return bool(self._data.get(frozen_url, {}).get(_KEY_ROUTED_AWAY, False))
+
+    def set_handed_to_server(self, frozen_url: str, server: str | None) -> None:
+        """Record that the user handed this speaker to a whole server.
+
+        Distinct from a hand-off to a *stream*, and the distinction decides
+        whether the stranded-speaker rescue may take the speaker back. A stream
+        hand-off is verifiable — the mesh either shows the speaker on that source
+        or it does not — so a failure can be detected and undone. Handing a
+        speaker to Music Assistant is not: MA publishes no mesh API, so the
+        speaker is on no source permanently and by design, and a rescue that
+        reads that as failure re-adopts it every few seconds forever.
+        """
+        entry = self._data.setdefault(frozen_url, {})
+        if server is None:
+            entry.pop(_KEY_HANDED_TO_SERVER, None)
+        else:
+            entry[_KEY_HANDED_TO_SERVER] = server
+
+    def handed_to_server(self, frozen_url: str) -> str | None:
+        """The server the user handed this speaker to, if they did."""
+        value = self._data.get(frozen_url, {}).get(_KEY_HANDED_TO_SERVER)
+        return str(value) if value is not None else None
 
     # --- Reading -----------------------------------------------------------
 
