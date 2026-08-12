@@ -55,6 +55,11 @@ async def async_get_config_entry_diagnostics(
                 "volume": snapshot.volume,
                 "muted": snapshot.muted,
                 "source": snapshot.source_label,
+                # Which group the mesh puts it in, and who holds it. Together
+                # these are how the assigned source is resolved, so a wrong
+                # `source` is diagnosed here.
+                "held_by_server": snapshot.held_by_server,
+                "held_by_us": snapshot.held_by_us,
                 "media_title": snapshot.media_title,
                 "media_artist": snapshot.media_artist,
                 "media_playing": snapshot.media_playing,
@@ -66,6 +71,9 @@ async def async_get_config_entry_diagnostics(
             # False simply means no Plum-Audio unit answered. The integration
             # works without one; there are just no streams to list.
             "reachable": mesh.reachable,
+            # The dropdown shows only live sources, so which ones qualified is
+            # the first thing to check when a stream is missing from it.
+            "live_sources": [source.label for source in data.live_sources],
             "sources": [
                 {
                     "key": source.key,
@@ -73,6 +81,7 @@ async def async_get_config_entry_diagnostics(
                     "unit_host": source.unit_host,
                     "active": source.active,
                     "streaming": source.streaming,
+                    "group_id": source.group_id,
                     "player_ids": list(source.player_ids),
                     "supports_source_volume": source.supports_source_volume,
                 }

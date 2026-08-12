@@ -66,6 +66,14 @@ class EndpointSnapshot:
     held_by_server: str | None = None
     """Whatever currently holds the speaker, for the user's benefit."""
 
+    held_by_us: bool = False
+    """Home Assistant is the holder.
+
+    Distinct from `connected`, which is only true while our own socket is up:
+    the mesh can report us as the holder from a unit's point of view. Naming
+    ourselves as this speaker's *source* is wrong either way — we originate no
+    audio, so holding a speaker on no stream is the none state."""
+
     held_by_unit_host: str | None = None
     """The Plum unit currently holding this speaker, if any. Volume has to be
     commanded through whoever holds the connection."""
@@ -102,9 +110,19 @@ class SendspinData:
     handed to one of these, which is how it gets back to Music Assistant."""
 
     sources: tuple[MeshSource, ...] = ()
-    """Streams available right now, rebuilt on every mesh poll. Empty with no
-    Plum mesh on the network, which is a legitimate state rather than an
-    error — the integration still adopts and controls speakers."""
+    """*Every* source the mesh knows, live or not, rebuilt on every mesh poll.
+
+    Not what the dropdown shows — see `live_sources`. This is the set a label is
+    resolved against, so a stream that dies while selected can still be named.
+    Empty with no Plum mesh on the network, which is a legitimate state rather
+    than an error: the integration still adopts and controls speakers."""
+
+    live_sources: tuple[MeshSource, ...] = ()
+    """The subset something is actually feeding, in dropdown order.
+
+    A unit publishes every configured input whether or not a sender is
+    connected, so this is the only honest answer to "what can this speaker be
+    put on right now"."""
 
 
 @dataclass(slots=True)

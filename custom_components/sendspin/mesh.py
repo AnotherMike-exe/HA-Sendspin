@@ -92,12 +92,20 @@ class MeshPlayer:
     of a speaker and ours: it lets us learn a speaker's client id without ever
     having held it, which we otherwise could not do."""
     held_by: str | None = None
+    """Name of the server currently holding this speaker — another Sendspin
+    server entirely, for a unit's own speaker that something else has taken."""
     held_by_server_id: str | None = None
     """Identity of the server holding this speaker. Matches the `server_id` a
     controller link reports, which is how a link's now-playing is attached to
     the speakers actually listening to it."""
-    """Name of the server currently holding this speaker — another Sendspin
-    server entirely, for a unit's own speaker that something else has taken."""
+    group_id: str | None = None
+    """The Sendspin group this speaker is currently in.
+
+    The real routing signal, and the reason `source.player_ids` is not enough:
+    on live hardware every unit reports `player_ids: []` and `players: []`, so
+    membership can only be recovered by matching this against a source's own
+    `group_id`. It also moves when *anything* re-routes the speaker, so it is
+    how a change made from another server's UI becomes visible here."""
     connected: bool = False
     volume: int | None = None
     muted: bool | None = None
@@ -135,22 +143,53 @@ class MeshView:
             return None
         return next((p for p in self.players if p.player_id == client_id), None)
 
+    def source_for_group(self, group_id: str | None) -> MeshSource | None:
+        """The source that owns a given Sendspin group."""
+        if group_id is None:
+            return None
+        return next((s for s in self.sources if s.group_id == group_id), None)
+
     def source_for_player(self, client_id: str | None) -> MeshSource | None:
-        """Which source, if any, a speaker is currently assigned to."""
+        """Which source, if any, a speaker is currently assigned to.
+
+        Two answers are tried, because units disagree about which they publish:
+
+        1. `source.player_ids` — the direct membership list.
+        2. the speaker's own `group_id` matched against a source's `group_id`.
+
+        (2) is what actually works on live hardware, where `player_ids` and
+        `players` are both empty on every unit; (1) is kept because it is the
+        cheaper and more direct answer wherever a unit does populate it. A
+        speaker in a group belonging to no source — a solo group, or a group on
+        a foreign server — matches neither, which is correctly "on no stream".
+        """
         if client_id is None:
             return None
-        return next((s for s in self.sources if client_id in s.player_ids), None)
+        direct = next((s for s in self.sources if client_id in s.player_ids), None)
+        if direct is not None:
+            return direct
+        player = self.player_by_id(client_id)
+        return self.source_for_group(player.group_id) if player is not None else None
 
     @property
-    def sorted_sources(self) -> list[MeshSource]:
-        """Active sources first, then alphabetically.
+    def live_sources(self) -> list[MeshSource]:
+        """Sources something is actually feeding, alphabetically.
 
-        All sources are listed, not just active ones. Assigning a speaker to an
-        idle source then starting the music is a normal workflow, and on a real
-        mesh every source reads inactive most of the time — filtering would
-        leave the dropdown empty exactly when someone wants to use it.
+        Only live sources are listed. A Plum unit publishes every *configured*
+        input whether or not anything is connected to it, so listing them all
+        offered a dropdown of mostly-fictional choices — an AirPlay endpoint
+        with no sender is not a stream a speaker can usefully be put on.
+
+        `active or streaming` rather than `streaming` alone: `streaming` drops
+        on a pause, and a paused sender must stay selectable. `active` is the
+        tolerant flag, held true for up to SOURCE_IDLE_TIMEOUT_S (300s by
+        default) after a sender walks away, which is the residual lag on a
+        source disappearing.
         """
-        return sorted(self.sources, key=lambda s: (not s.active, s.label.lower()))
+        return sorted(
+            (s for s in self.sources if s.active or s.streaming),
+            key=lambda s: s.label.lower(),
+        )
 
 
 def _as_bool(value: Any, default: bool = False) -> bool:
@@ -207,6 +246,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     name=player.get("name") or player_id,
                     url=player.get("url"),
                     held_by=unit_name,
+                    group_id=player.get("group_id"),
                     connected=_as_bool(player.get("connected"), True),
                     # What the speaker last *reported*, not what was commanded.
                     volume=player.get("volume"),
@@ -227,6 +267,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     url=local.get("url"),
                     held_by=local.get("server_name"),
                     held_by_server_id=local.get("server_id"),
+                    group_id=local.get("group_id"),
                     connected=_as_bool(local.get("attached"), False),
                 )
             )

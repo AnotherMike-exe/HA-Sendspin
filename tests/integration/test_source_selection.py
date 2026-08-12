@@ -41,6 +41,34 @@ FIXTURE = json.loads(
 )
 
 
+def live(*sources: tuple[str, str], payload: dict | None = None) -> dict:
+    """A copy of the mesh view with the named `(unit_id, source_id)` being fed.
+
+    The captured fixture is entirely idle, because a Plum unit publishes every
+    *configured* input whether or not a sender is connected to it. Only a fed
+    source is a stream, and only streams are offered — so any test about the
+    dropdown has to say which of the six are real.
+    """
+    copy = json.loads(json.dumps(FIXTURE if payload is None else payload))
+    wanted = set(sources)
+    for unit in copy["units"]:
+        for source in unit["sources"]:
+            if (unit["unit_id"], source["source_id"]) in wanted:
+                source["active"] = True
+                source["streaming"] = True
+    return copy
+
+
+async def repoll(hass: HomeAssistant, entry: MockConfigEntry, payload: dict) -> None:
+    """Feed the coordinator a fresh mesh view."""
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(payload),
+    ):
+        await entry.runtime_data.coordinator.async_refresh_mesh()
+    await flush(hass)
+
+
 async def flush(hass: HomeAssistant) -> None:
     """Let the coordinator's debounced publish land.
 
@@ -106,22 +134,118 @@ def entity_id(hass: HomeAssistant) -> str:
     return hass.states.async_entity_ids("media_player")[0]
 
 
-async def test_streams_appear_as_options_on_the_speaker(
+async def test_live_streams_appear_as_options_on_the_speaker(
     hass: HomeAssistant, fake_server: FakeSendspinServer
 ) -> None:
-    """Every source on the mesh is selectable, plus 'None'."""
-    await setup_with_mesh(hass, fake_server, FIXTURE)
+    """A source with a sender on it is selectable; a bare configured input is not.
+
+    The mesh publishes six sources here and two of them are being fed. Offering
+    all six put an AirPlay endpoint nothing was connected to in the dropdown as
+    though a speaker could usefully be routed to it.
+    """
+    await setup_with_mesh(
+        hass,
+        fake_server,
+        live(("unit-7204", "airplay-1"), ("unit-7122", "airplay-1")),
+    )
 
     state = hass.states.get(entity_id(hass))
     options = state.attributes["source_list"]
 
-    assert SOURCE_NONE in options
-    assert "Plum Amp100 / 204 AP" in options
-    assert "Plum RackPi / VLAN7 AirPlay" in options
-    assert len(options) == 7  # six sources plus None
+    assert options == [
+        SOURCE_NONE,
+        "Plum Amp100 / 204 AP",
+        "Plum RackPi / VLAN7 AirPlay",
+    ]
     assert (
         state.attributes["supported_features"] & MediaPlayerEntityFeature.SELECT_SOURCE
     )
+
+
+async def test_an_idle_mesh_offers_only_none(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Six configured inputs and no senders means nothing to route to.
+
+    A dropdown holding only 'None' is the honest answer, and 'None' has to stay
+    offered regardless — taking a speaker off a stream must never stop being
+    possible.
+    """
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    state = hass.states.get(entity_id(hass))
+
+    assert state.attributes["source_list"] == [SOURCE_NONE]
+    assert (
+        state.attributes["supported_features"] & MediaPlayerEntityFeature.SELECT_SOURCE
+    )
+
+
+async def test_a_stream_that_dies_while_selected_stays_pinned(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The selection must never be a value absent from its own options.
+
+    A sender walking away drops the source from the live set, but the speaker is
+    still on it until something moves it. Dropping the label outright left Home
+    Assistant rendering a blank dropdown over a speaker that was still routed.
+    """
+    playing = live(("unit-7204", "airplay-1"))
+    playing["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    entry, _assign = await setup_with_mesh(hass, fake_server, playing)
+
+    assert hass.states.get(entity_id(hass)).attributes["source"] == (
+        "Plum Amp100 / 204 AP"
+    )
+
+    # The sender leaves. The source stops being live; the speaker stays on it.
+    ended = json.loads(json.dumps(playing))
+    ended["units"][0]["sources"][0]["active"] = False
+    ended["units"][0]["sources"][0]["streaming"] = False
+    await repoll(hass, entry, ended)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["source"] == "Plum Amp100 / 204 AP"
+    assert "Plum Amp100 / 204 AP" in state.attributes["source_list"]
+
+
+async def test_a_speaker_we_hold_reports_none_not_our_own_name(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Home Assistant is not a source.
+
+    The mesh names us as the holder, and reporting that name put a value in the
+    box that appeared in no dropdown. We originate no audio, so holding a
+    speaker on no stream *is* the none state.
+    """
+    held_by_us = json.loads(json.dumps(FIXTURE))
+    local = held_by_us["units"][0]["local_player"]
+    local["player_id"] = CLIENT_ID
+    local["url"] = PLAYER_URL
+    local["server_name"] = "Home"
+    local["server_id"] = "our-server-id"
+
+    with patch(
+        "custom_components.sendspin.server_host.ServerHost.server_id",
+        new="our-server-id",
+    ):
+        entry, _assign = await setup_with_mesh(hass, fake_server, held_by_us)
+        # Drop our own socket, so the only thing saying we hold it is the mesh's
+        # `server_id` — the branch under test. While `connected` is true the
+        # answer is right for a different reason.
+        fake_server.clients_by_id[CLIENT_ID].is_connected = False
+        fake_server.emit(
+            ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None)
+        )
+        await flush(hass)
+        state = hass.states.get(entity_id(hass))
+
+    snapshot = entry.runtime_data.coordinator.data.endpoints[PLAYER_URL]
+    assert snapshot.connected is False
+    assert snapshot.held_by_us is True
+
+    assert state.attributes["source"] == SOURCE_NONE
+    assert "Home" not in state.attributes["source_list"]
 
 
 async def test_no_mesh_means_no_dropdown_rather_than_an_empty_one(
@@ -857,7 +981,13 @@ async def test_another_server_is_offered_as_a_source(
 
     options = hass.states.get(entity_id(hass)).attributes["source_list"]
     assert "Music Assistant" in options
-    assert "Plum Amp100 / 204 AP" in options
+
+    # The Plum units run Sendspin servers too, and links to them are open — but
+    # they are already in the dropdown as their own streams. Offering the bare
+    # unit name beside `Plum Amp100 / 204 AP` was meaningless: selecting it only
+    # released the speaker and hoped the unit re-dialled.
+    assert "Plum Amp100" not in options
+    assert "Plum RackPi" not in options
 
     # Choosing it stops us holding the speaker, so that server can take it.
     with patch(
@@ -874,6 +1004,88 @@ async def test_another_server_is_offered_as_a_source(
 
     assert fake_server.live_dial_urls == set()
     assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+
+
+async def test_an_unconfirmed_mesh_stops_asserting_what_is_live(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A frozen view keeps identities but must not keep claiming a stream is fed.
+
+    An unreachable mesh deliberately does not clear the view — a dropped poll
+    must never read as every stream having ended. But "something is feeding this
+    source" is a statement about *now*, and a sender that left during an outage
+    would otherwise stay selectable forever.
+    """
+    from custom_components.sendspin.mesh import MeshView
+
+    entry, _assign = await setup_with_mesh(
+        hass, fake_server, live(("unit-7204", "airplay-1"))
+    )
+    coordinator = entry.runtime_data.coordinator
+    assert (
+        "Plum Amp100 / 204 AP"
+        in hass.states.get(entity_id(hass)).attributes["source_list"]
+    )
+
+    # The mesh stops answering, and stays unanswered past the liveness TTL.
+    coordinator._mesh_fetched_at = hass.loop.time() - 3600
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=MeshView(reachable=False),
+    ):
+        await coordinator.async_refresh_mesh()
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["source_list"] == [SOURCE_NONE]
+    # The view itself survives, so labels still resolve and routing still works.
+    assert len(coordinator.mesh_view.sources) == 6
+
+    # And the stream comes back when the mesh does — even though the source set
+    # is identical across the outage, which is the common case.
+    await repoll(hass, entry, live(("unit-7204", "airplay-1")))
+
+    assert (
+        "Plum Amp100 / 204 AP"
+        in hass.states.get(entity_id(hass)).attributes["source_list"]
+    )
+
+
+async def test_a_plum_unit_is_never_offered_as_a_server(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A unit reached by a connected link still must not become an entry.
+
+    Each Plum unit runs a Sendspin server, so a link to one reports a perfectly
+    valid `server/hello` name — which is how a bare `Plum Amp100` ended up in
+    the dropdown beside that same unit's `Plum Amp100 / 204 AP`. The unit is
+    already reachable by naming its streams; the bare entry only released the
+    speaker.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.204",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="unit-7204",
+            server_name="Plum Amp100",
+        ),
+    )
+
+    # The link is live and reporting a name — this is not passing by absence.
+    link = entry.runtime_data.coordinator.links["server:192.168.7.204"]
+    assert link.snapshot.connected is True
+    assert link.snapshot.server_name == "Plum Amp100"
+
+    assert entry.runtime_data.coordinator.data.servers == ()
+    assert (
+        "Plum Amp100" not in hass.states.get(entity_id(hass)).attributes["source_list"]
+    )
 
 
 async def test_the_server_we_read_from_is_named_as_the_source(

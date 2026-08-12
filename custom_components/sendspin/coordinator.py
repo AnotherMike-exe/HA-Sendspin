@@ -61,6 +61,13 @@ _EVENT_DEBOUNCE_S = 0.2
 # back. More than one, because the mesh lags a routing call by a poll or two.
 _STRAND_CONFIRMATIONS = 3
 
+# How long a mesh view may go unconfirmed before its liveness flags stop being
+# trusted. The view itself is still kept — it is the only source of a speaker's
+# identity and of which unit owns which stream — but "something is feeding this
+# source" is a statement about *now*, and a source that ended during an outage
+# would otherwise stay in the dropdown indefinitely.
+_MESH_LIVENESS_TTL_S = 60.0
+
 # And ignore strandedness entirely for this long after a routing call. Plum
 # aggregates peer state on a 2s loop and we poll on a 5s one, so a successful
 # hand-off looks exactly like a failed one for the first few seconds. Without
@@ -110,6 +117,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         self._cancel_mesh_poll: callable | None = None
         self._mesh = MeshClient(async_get_clientsession(hass))
         self._mesh_view = MeshView()
+        self._mesh_fetched_at: float | None = None
+        self._mesh_liveness_dropped = False
         self._mesh_hosts: list[str] = []
         self._strand_checks: dict[str, int] = {}
         self._links: dict[str, LegacyControllerClient] = {}
@@ -290,18 +299,36 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             return
         view = await self._mesh.async_fetch_view(list(dict.fromkeys(hosts)))
         if not view.reachable:
+            # The view is deliberately kept: a failed fetch must never be read
+            # as every stream having ended. But its liveness flags do expire,
+            # and nothing else would ever trigger that publish.
+            if self._mesh_liveness_expired() and not self._mesh_liveness_dropped:
+                self._mesh_liveness_dropped = True
+                self.async_request_publish()
             return
+        # Recovering re-asserts liveness, and the source set is very often
+        # unchanged across the outage — so without this the dropdown would stay
+        # empty until something else happened to trigger a publish.
+        recovered = self._mesh_liveness_dropped
+        self._mesh_liveness_dropped = False
         changed = (
             view.sources != self._mesh_view.sources
             or view.players != self._mesh_view.players
         )
         self._mesh_view = view
+        self._mesh_fetched_at = self.hass.loop.time()
         self._async_sync_links()
         self._async_drop_duplicate_links()
         if not self._stopped:
             await self._async_rescue_stranded()
-        if changed:
+        if changed or recovered:
             self.async_request_publish()
+
+    def _mesh_liveness_expired(self) -> bool:
+        """Whether the mesh view is too old to say what is playing."""
+        if self._mesh_fetched_at is None:
+            return False
+        return self.hass.loop.time() - self._mesh_fetched_at > _MESH_LIVENESS_TTL_S
 
     async def _async_rescue_stranded(self) -> None:
         """Resume dialling a speaker whose hand-off did not stick.
@@ -648,6 +675,11 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 source_label=assigned.label if assigned is not None else None,
                 source_streaming=assigned.streaming if assigned is not None else False,
                 held_by_unit_host=held_by,
+                held_by_us=connected
+                or (
+                    mesh_player is not None
+                    and mesh_player.held_by_server_id == self.host.server_id
+                ),
                 known_to_mesh=mesh_player is not None,
                 media_title=media.title if media else None,
                 media_artist=media.artist if media else None,
@@ -682,14 +714,52 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 routed_away=self.memo.routed_away(frozen_url),
             )
 
-        servers: dict[str, str] = {}
-        for link in self._links.values():
-            snapshot = link.snapshot
-            if snapshot.connected and snapshot.server_id and snapshot.server_name:
-                servers.setdefault(snapshot.server_id, snapshot.server_name)
-
         return SendspinData(
             endpoints=endpoints,
-            sources=tuple(self._mesh_view.sorted_sources),
-            servers=tuple(sorted(servers.items(), key=lambda kv: kv[1].lower())),
+            sources=self._mesh_view.sources,
+            live_sources=(
+                ()
+                if self._mesh_liveness_expired()
+                else tuple(self._mesh_view.live_sources)
+            ),
+            servers=self._foreign_servers(),
         )
+
+    def _foreign_servers(self) -> tuple[tuple[str, str], ...]:
+        """Other Sendspin servers a speaker could be handed to.
+
+        Every connected link used to qualify, which put a bare `Plum Amp100`
+        into the dropdown beside that unit's own `Plum Amp100 / 204 AP` streams.
+        Selecting it did nothing useful — it released the speaker and hoped the
+        unit re-dialled — so a unit we can already route through by name is not
+        a destination. Three kinds are excluded:
+
+        - **Plum units**, which appear as sources already. Their streams are the
+          precise way to route to them.
+        - **Ourselves.** We originate no audio; handing a speaker to Home
+          Assistant is the none state, not a source.
+        - **`ctrl:` links**, which exist only to read a stream's now-playing and
+          are always aimed at a unit we just excluded anyway.
+
+        What survives is a server that holds speakers but publishes no mesh API
+        — Music Assistant — which is exactly the case the feature exists for.
+        """
+        unit_hosts = {s.unit_host for s in self._mesh_view.sources if s.unit_host}
+        servers: dict[str, str] = {}
+        for key, link in self._links.items():
+            snapshot = link.snapshot
+            if not (snapshot.connected and snapshot.server_id and snapshot.server_name):
+                continue
+            if key.startswith("ctrl:"):
+                continue
+            if snapshot.server_id == self.host.server_id:
+                continue
+            if key.removeprefix("server:").strip("[]") in unit_hosts:
+                continue
+            # A unit reached over a second address — an IPv6 ULA, say — carries
+            # the same `server_id` as its mesh entry, so identity catches what
+            # the host comparison cannot.
+            if any(s.unit_id == snapshot.server_id for s in self._mesh_view.sources):
+                continue
+            servers.setdefault(snapshot.server_id, snapshot.server_name)
+        return tuple(sorted(servers.items(), key=lambda kv: kv[1].lower()))

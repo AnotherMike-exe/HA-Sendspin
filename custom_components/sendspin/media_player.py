@@ -115,7 +115,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         # speaker — and it has to, because handing a speaker to another unit is
         # precisely what makes us stop holding it. Gating this on `connected`
         # made the control destroy itself the moment it succeeded.
-        if self.coordinator.data.sources:
+        #
+        # Gated on exactly what `source_list` publishes, or a populated dropdown
+        # could appear with no capability to act on it.
+        if self.source_list is not None:
             features |= MediaPlayerEntityFeature.SELECT_SOURCE
 
         # Transport reflects what the server observing this stream actually
@@ -134,22 +137,38 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         up without any entity being created or destroyed. That is the whole
         reason entities are anchored to speakers rather than to streams.
 
-        All sources are listed, active ones first — not just active ones.
-        Assigning a speaker and then starting the music is a normal workflow,
-        and on a real mesh everything reads inactive most of the time.
+        **Only live sources.** A Plum unit publishes every configured input
+        whether or not a sender is connected to it, so listing them all offered
+        an AirPlay endpoint nothing was feeding as if it were a stream. What is
+        selectable is now what is actually available.
+
+        `None` — no dropdown at all — is reserved for having nothing to choose
+        between. Once there is a mesh, `SOURCE_NONE` is always offered, because
+        taking a speaker off a stream must never stop being possible.
         """
         data = self.coordinator.data
         if not data.sources and not data.servers:
             return None
+
+        live = [source.label for source in data.live_sources]
         # Other Sendspin servers are offered alongside streams, because handing
         # a speaker back to Music Assistant is exactly as much a routing choice
         # as putting it on a unit's input — and there was previously no way to
         # express it at all.
-        return [
+        options = [
             SOURCE_NONE,
             *(name for _server_id, name in data.servers),
-            *(source.label for source in data.sources),
+            *live,
         ]
+
+        # Pin whatever is selected, even once it stops being live. A stream that
+        # ends while a speaker is on it would otherwise leave the entity
+        # reporting a source absent from its own options, which Home Assistant
+        # renders as a blank dropdown.
+        current = self.source
+        if current is not None and current not in options:
+            options.append(current)
+        return options
 
     @property
     def source(self) -> str | None:
@@ -162,6 +181,11 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return None
         if endpoint.source_label is not None:
             return endpoint.source_label
+        if endpoint.held_by_us:
+            # We are the holder. Naming ourselves as the source was confusing
+            # and put a value in the box that is in no dropdown — Home Assistant
+            # holding a speaker on no stream *is* the none state.
+            return SOURCE_NONE
         # Held by another server rather than on one of our streams. Saying so
         # is the honest answer; "None" read as "not routed anywhere".
         return endpoint.held_by_server or SOURCE_NONE

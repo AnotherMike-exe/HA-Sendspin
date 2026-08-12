@@ -2,8 +2,9 @@
 
 `mesh_view.json` is a real capture from a live two-unit mesh, not a
 hand-written approximation — including the detail that every source reads
-inactive, which is the normal resting state and the case a naive
-"only show active sources" filter gets wrong.
+inactive while nothing is playing. A unit publishes every *configured* input
+regardless, so that capture is six sources and zero live streams, which is why
+the dropdown filters rather than listing what the API returns.
 """
 
 from __future__ import annotations
@@ -50,28 +51,62 @@ def test_labels_name_the_unit_so_they_are_distinguishable() -> None:
     assert len(labels) == 6
 
 
-def test_all_sources_are_listed_even_though_none_is_active() -> None:
-    """The captured mesh is entirely idle, which is the normal resting state.
+def test_an_idle_mesh_offers_no_live_sources() -> None:
+    """Every configured input is published; none of them is a stream yet.
 
-    Filtering the dropdown to active sources would leave it empty exactly when
-    someone wants to assign a speaker and then start the music.
+    The captured mesh has six sources and nothing feeding any of them. Offering
+    all six put an AirPlay endpoint with no sender in the dropdown as though a
+    speaker could usefully be put on it.
     """
     view = parse_view(FIXTURE)
 
-    assert all(not s.active for s in view.sources)
-    assert len(view.sorted_sources) == 6
+    assert len(view.sources) == 6
+    assert view.live_sources == []
 
 
-def test_active_sources_sort_first() -> None:
-    """Idle sources stay selectable, but what is playing is easiest to reach."""
+def test_only_a_fed_source_is_live() -> None:
+    """A sender arriving is what turns a configured input into a stream."""
     payload = json.loads(json.dumps(FIXTURE))
     payload["units"][1]["sources"][0]["active"] = True
+    payload["units"][1]["sources"][0]["streaming"] = True
     expected = payload["units"][1]["sources"][0]["name"]
 
     view = parse_view(payload)
 
-    assert view.sorted_sources[0].name == expected
-    assert view.sorted_sources[0].active is True
+    assert [s.name for s in view.live_sources] == [expected]
+
+
+def test_a_paused_sender_stays_live() -> None:
+    """`streaming` drops on a pause; `active` is what keeps the source usable.
+
+    Filtering on `streaming` alone would make a paused stream vanish from the
+    dropdown mid-track, taking the user's selection with it.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["active"] = True
+    payload["units"][0]["sources"][0]["streaming"] = False
+
+    assert [s.source_id for s in parse_view(payload).live_sources] == ["airplay-1"]
+
+
+def test_streaming_without_active_is_still_live() -> None:
+    """Either flag suffices; they are not always set together."""
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][1]["streaming"] = True
+
+    assert [s.source_id for s in parse_view(payload).live_sources] == ["bluetooth-1"]
+
+
+def test_live_sources_are_ordered_by_label() -> None:
+    """Stable, predictable dropdown order once nothing is idle to sort around."""
+    payload = json.loads(json.dumps(FIXTURE))
+    for unit in payload["units"]:
+        for source in unit["sources"]:
+            source["active"] = True
+
+    labels = [s.label for s in parse_view(payload).live_sources]
+
+    assert labels == sorted(labels, key=str.lower)
 
 
 def test_a_speaker_is_matched_to_the_source_holding_it() -> None:
@@ -84,6 +119,48 @@ def test_a_speaker_is_matched_to_the_source_holding_it() -> None:
     assert view.source_for_player("98:A3:16:D0:9E:E8").source_id == "airplay-1"
     assert view.source_for_player("not-a-player") is None
     assert view.source_for_player(None) is None
+
+
+def test_a_speaker_is_matched_by_its_group_when_player_ids_are_empty() -> None:
+    """The membership signal that actually exists on live hardware.
+
+    Every unit on the real mesh reports `player_ids: []` and `players: []`, so
+    the direct membership list never matches and a routed speaker read as being
+    on no stream. Its `local_player.group_id` is the join key: it equals the
+    `group_id` of whichever source it is on, and it moves whenever *anything*
+    re-routes the speaker — which is how a change made from another server's UI
+    becomes visible here.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    source = payload["units"][0]["sources"][0]
+    assert source["player_ids"] == []
+    payload["units"][0]["local_player"]["group_id"] = source["group_id"]
+
+    view = parse_view(payload)
+
+    assert view.source_for_player("player-7204").source_id == "airplay-1"
+
+
+def test_a_speaker_in_a_group_belonging_to_no_source_is_on_no_stream() -> None:
+    """A solo group, or a group on a foreign server, is the none state.
+
+    This is what makes a return to none detectable rather than sticky.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["local_player"]["group_id"] = "a-group-no-source-owns"
+
+    assert parse_view(payload).source_for_player("player-7204") is None
+
+
+def test_the_group_of_a_source_is_parsed() -> None:
+    """The other half of the join, and a direct lookup for it."""
+    view = parse_view(FIXTURE)
+    source = view.source_for_group("9607156d-57d5-488f-803f-8539638f535e")
+
+    assert source is not None
+    assert source.key == "unit-7204:airplay-1"
+    assert view.source_for_group("nothing-owns-this") is None
+    assert view.source_for_group(None) is None
 
 
 def test_missing_fields_do_not_break_parsing() -> None:
