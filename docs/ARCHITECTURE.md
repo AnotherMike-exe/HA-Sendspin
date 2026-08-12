@@ -2,9 +2,10 @@
 
 Living document. Update as the codebase evolves.
 
-**Status**: adoption, presence, volume and source selection are implemented
-and tested. Metadata, artwork, progress and transport are not — see
-[OPEN-QUESTIONS §7](OPEN-QUESTIONS.md).
+**Status**: discovery, adoption, source selection, now-playing, cover art and
+transport are implemented and verified against real hardware. Per-speaker volume
+for a speaker another server holds is not — see
+[OPEN-QUESTIONS §8](OPEN-QUESTIONS.md).
 
 ---
 
@@ -136,7 +137,34 @@ Available streams instead populate each speaker's `source_list`, and
 *is* the group — Sendspin's own semantics — so no grouping feature is
 advertised.
 
-### 3.5. Services (`services.py`)
+### 3.5. Controller links (`legacy_client.py`)
+
+**A hand-written protocol client**, not the library's. `aiosendspin` 9.1.0's
+client always initiates the 8.0 Noise handshake and cannot fall back —
+`allow_unencrypted` exists only on the server — so it cannot talk to any
+Sendspin server in the field. Music Assistant and Plum-Audio units alike close
+the socket on `client/init`. The older protocol is plain JSON over a websocket,
+so this speaks it directly, which also decouples the controller role from the
+library version permanently.
+
+This is the **only** source of now-playing. A controller observes just the group
+it occupies, so:
+
+- Against a Plum unit, a client id of `ctrl:<source_id>:<nonce>` asks that unit
+  to place the controller in the named source's group. Deterministic, and used
+  for every source one of our speakers is on.
+- Against any other server, there is no such hook — Music Assistant leaves a
+  controller in its own solo group reporting nothing. `switch` cycles a
+  controller through that server's *playing* groups, which is the only way in.
+  Hunting is continuous but rate-limited, and never applied to a targeted link.
+
+Attribution — deciding which speaker a link's now-playing belongs to — is, in
+order: the speaker is on a mesh source this link observes; the mesh says a
+server holds it and this link *is* that server; or exactly one observed server
+is playing. Two servers playing the **same** track is one answer, not an
+ambiguity: a server feeding another's input puts the same audio on both.
+
+### 3.6. Services (`services.py`)
 
 The **adoption lifecycle only**: `adopt_player`, `release_player`,
 `reclaim_player`. Routing is not a service — it is `media_player.select_source`.
@@ -168,7 +196,9 @@ it is the user's consent record rather than integration state.
 
 | Dependency | Purpose | Method |
 |---|---|---|
-| `aiosendspin` | Sendspin controller/client role — stream control, group add/remove/roam | Python library (pinned in `manifest.json`) |
+| `aiosendspin` | Sendspin **server** role — adoption, groups, routing primitives | Python library, pinned `==9.1.0` |
+| (hand-written) | Sendspin **controller** role — now-playing, artwork, transport | `legacy_client.py`, plain JSON over a websocket |
+| Plum-Audio mesh API | Stream list and routing | HTTP, optional, auto-detected |
 | HA core `zeroconf` | mDNS discovery | Manifest `zeroconf` key → discovery flow |
 
 **Relevant `aiosendspin` calls** (per Plum-Audio prior art in

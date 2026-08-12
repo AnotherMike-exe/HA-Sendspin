@@ -21,10 +21,13 @@ and independently of Music Assistant.
 - **Availability as a first-class signal** — speaker presence maps onto entity
   availability, so automations trigger on a player dropping off the mesh
   natively, with no polling script.
+- **Now-playing, artwork and transport** — read from whichever server is
+  driving the speaker, via a hand-written pre-8.0 controller client.
+- **Other servers as sources** — a speaker can be handed to Music Assistant and
+  taken back, in the same dropdown as the mesh's own streams.
 
-**Not yet delivered**: metadata, artwork, progress and transport. See
-`docs/OPEN-QUESTIONS.md` §7 — no server on a pre-8.0 network can accept our
-controller client.
+**Not yet delivered**: per-speaker volume for a speaker another server holds.
+See `docs/OPEN-QUESTIONS.md` §8.
 
 ### Why this exists
 Music Assistant already provides discovery, `media_player` entities, and
@@ -83,14 +86,17 @@ These encode traps this project **will** hit. They are not style preferences.
    three services are the adoption lifecycle only: adopt, release, reclaim.
    **No service takes a `player_id`**; they target HA devices, and the only raw
    identifier accepted anywhere is the listener URL.
-3. **Server role, source-less.** HA hosts an in-process `SendspinServer` as
-   the routing authority, because a controller-role *client* cannot enumerate
-   groups, list players, or move a player between groups — that surface does
-   not exist on the wire. But this server **originates no audio** (never calls
-   `start_stream()`, so no `PushStream` is ever created) and **never advertises
-   over mDNS** (never calls `start_server()`, so no `AsyncZeroconf` is
-   constructed and nothing binds 5353). It also never listens: Sendspin servers
-   dial players, so HA is always the dialer.
+3. **Server role for routing, hand-written controller role for reading.** HA
+   hosts an in-process `SendspinServer` as the routing authority, because a
+   controller *client* cannot enumerate groups, list players, or move a player
+   — that surface does not exist on the wire. This server **originates no
+   audio** (never calls `start_stream()`), **never advertises over mDNS**
+   (never calls `start_server()`), and never listens: Sendspin servers dial
+   players, so HA is always the dialer.
+
+   Now-playing comes from `legacy_client.py`, **not** from `aiosendspin`'s
+   client, which speaks only the 8.0+ handshake that no server in the field
+   accepts. Do not "simplify" it back to the library.
 4. **Two zeroconf service types, duplicated by necessity.** Servers advertise
    `_sendspin-server._tcp` (8927); players advertise `_sendspin._tcp` (8928).
    `manifest.json` and `const.py` must stay in sync, as must the runtime

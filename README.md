@@ -9,9 +9,9 @@ network. If you want HA-native Sendspin routing today, the alternative is
 installing all of Music Assistant to get the Sendspin slice. This is that
 slice, on its own.
 
-> **Status: v0.1.0 — early, and honest about it.** Adoption, presence, volume
-> and stream selection work and are covered by tests. **Metadata, artwork,
-> progress and transport do not** — see [what doesn't work yet](#what-doesnt-work-yet).
+> **Status: v0.3.x — working, and honest about its edges.** Discovery,
+> adoption, stream selection, now-playing, cover art and transport all work
+> against real hardware. See [what doesn't work yet](#what-doesnt-work-yet).
 
 ---
 
@@ -28,6 +28,11 @@ slice, on its own.
   model, so there is no separate grouping control.
 - 📶 **Presence as availability**, so automations can trigger on a speaker
   dropping off the mesh with no polling script.
+- 🎵 **Now-playing, cover art and transport** — title, artist, album, a
+  progress bar and play/pause/next/previous, for a speaker **whoever is driving
+  it**, including Music Assistant.
+- 🔁 **Both directions.** Other Sendspin servers appear in the same dropdown as
+  your streams, so a speaker can be handed to Music Assistant and taken back.
 - 🤝 **It declines to fight.** If another Sendspin server takes a speaker back,
   the integration stops dialling and tells you, rather than starting a
   tug-of-war that degrades both. `sendspin.reclaim_player` overrides that when
@@ -35,17 +40,24 @@ slice, on its own.
 
 ## What doesn't work yet
 
-- **No metadata, artwork, progress or transport controls.** These require a
-  controller connection to the server that is playing, and **no Sendspin server
-  running a pre-8.0 release will accept one** from the current library — the
-  handshake is rejected outright. This affects Music Assistant and Plum-Audio
-  units alike. See [OPEN-QUESTIONS §7](docs/OPEN-QUESTIONS.md).
+- **No volume slider for a speaker another server holds.** Per-speaker volume
+  can only be commanded by whatever holds the speaker's connection. Home
+  Assistant can do it for speakers it holds, and Plum-Audio units expose it for
+  theirs — but Music Assistant offers a controller only *group* volume, which
+  would move every speaker on the stream at once. See
+  [OPEN-QUESTIONS §8](docs/OPEN-QUESTIONS.md).
+- **No seek.** There is no seek command at any Sendspin version, so the progress
+  bar is read-only.
 - **Home Assistant plays no audio of its own.** It routes and controls; it is
   not a source.
 - **The stream list needs a Plum-Audio unit.** No Sendspin server exposes a way
   for an outsider to enumerate its streams, so the source dropdown comes from
-  Plum-Audio's mesh API. Without one, the integration still adopts and controls
-  speakers — there is simply nothing to select.
+  Plum-Audio's mesh API. Without one you still get speakers, other servers as
+  sources, and now-playing — just no per-stream routing targets.
+- **Handing a speaker to another server is a release, not a handoff.** The
+  protocol has no "give this speaker to that server" verb, so choosing another
+  server stops Home Assistant holding the speaker and lets that server's own
+  dialling take it.
 
 ## Requirements
 
@@ -93,6 +105,9 @@ Routing is not a service — it is `media_player.select_source` on the speaker.
 - **Protocol**: [Sendspin](https://www.sendspin-audio.com/spec/) via
   [`aiosendspin`](https://github.com/Sendspin/aiosendspin) — **server** role,
   source-less. It renders no audio and never advertises itself over mDNS.
+  The **controller** role is hand-written (`legacy_client.py`): the library's
+  client speaks only the 8.0+ handshake, which no Sendspin server in the field
+  accepts.
 - **Distribution**: HACS
 
 Not containerised — this integration has no audio pipeline of its own, so there

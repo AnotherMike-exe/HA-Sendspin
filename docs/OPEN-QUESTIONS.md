@@ -2,14 +2,13 @@
 
 Design questions that change the *shape* of the integration, not code TODOs.
 Started from the original project outline
-(`_resources/Notes/sendspin-ha-integration-outline.md`); §7 records what the
-hardware actually did, which resolved several of them and opened one new
-blocker.
+(`_resources/Notes/sendspin-ha-integration-outline.md`).
 
 Status legend: 🔴 blocking · 🟡 needs a design pass · 🟢 decided
 
-**Read §7 first.** It is the only section describing observed behaviour rather
-than intent, and it contains the item that currently blocks metadata entirely.
+**Read §7 first.** It is the only section describing what the hardware actually
+did rather than what was intended, and most of the decisions above were settled
+by it. §8 is the one live question.
 
 ---
 
@@ -203,7 +202,7 @@ Confirms `UPSTREAM-AIOSENDSPIN.md` §1. The fleet works only because
 happens when upstream tightens that default, alongside the existing question
 about `allow_unencrypted` being removed from transition mode.
 
-### 🔴 The controller link cannot reach any server on the network
+### 🟢 RESOLVED — the controller link cannot use the *library*, so it was written by hand
 
 Probed with a controller-role `SendspinClient` from aiosendspin 9.1.0. All three
 servers reject it identically:
@@ -238,7 +237,17 @@ fleet:
 all require a controller socket joined to a playing group. **M4 is unaffected**:
 source listing and routing run over the mesh REST API on plain HTTP.
 
-**Options, none yet chosen:**
+**Resolved by option 1**, in v0.2.0. `legacy_client.py` speaks the pre-8.0
+protocol directly and is admitted by every server on the network. Verified live:
+title, artist, album, progress, 25-29KB of JPEG cover art and the full transport
+set, from both a Plum unit and Music Assistant.
+
+Two behaviours had to be learned on hardware, and are recorded in
+`docs/ARCHITECTURE.md` §3.5: Plum honours a `ctrl:<source_id>` client id and
+places the controller directly, while Music Assistant does not and has to be
+found with `switch`.
+
+**Options as they stood:**
 
 1. **Hand-roll a minimal legacy controller client.** The pre-8.0 wire protocol
    is plain JSON over a websocket — `client/hello` → `server/hello`, then
@@ -261,3 +270,37 @@ streaming=False`, and the three bare players did not appear in any unit's
 rendered an **empty dropdown**. Routing a speaker to an idle source is a normal
 workflow — assign it, then start playing — so `source_list` shows all sources
 with active ones sorted first.
+
+
+---
+
+## 8. Per-speaker volume for a speaker another server holds — 🟡 needs a decision
+
+**Question**: how should Home Assistant offer volume for a speaker it does not
+hold?
+
+Per-speaker volume can only be commanded over the connection the *holding*
+server owns. Three cases:
+
+| Who holds the speaker | Volume available? | How |
+|---|---|---|
+| Home Assistant | ✅ | `player@v1` role over our own connection |
+| A Plum-Audio unit | ✅ | `POST /api/mesh/volume` on that unit |
+| Anything else, e.g. Music Assistant | ❌ | no per-player control exists for us |
+
+Confirmed on hardware: a speaker Music Assistant holds reports `volume: null`
+and offers no slider, because nothing we can reach knows its level.
+
+**The tempting option, and why it is not obviously right.** A controller link
+does expose a `volume` command — but it is **group** volume for the stream, not
+the speaker. With one speaker on a stream the two coincide; with three, moving
+one entity's slider moves all three. Shipping that as a per-speaker control
+would be quietly wrong in exactly the multi-room case this project exists for.
+
+**Options:**
+
+1. Offer it anyway, documented as stream volume. Simple; misleading when a
+   stream has several speakers.
+2. Expose stream volume as a separate control — the stream entity described in
+   the original plan, which was deferred and never built.
+3. Leave it absent, as now, and rely on the holding server's own UI.
