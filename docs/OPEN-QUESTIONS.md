@@ -343,6 +343,43 @@ Two things this settles:
   because an unrouted speaker is in no membership list. So both branches of the
   match agree, and keeping the direct one first costs nothing.
 
+### Handing a speaker to a server is a request, not a command — and it is slow
+
+There is no Sendspin verb for "give this speaker to that server". Selecting a
+server in the dropdown can only stop us holding the speaker and leave the target
+to dial it, and a server dials a player when *it* decides to.
+
+Measured 2026-08-12, handing `player-7204` to Music Assistant. For the **four
+minutes** watched, the mesh reported:
+
+```
+local_player player-7204  attached=false   (no server_id, no server_name)
+```
+
+Held by nothing, silent, and indistinguishable from a hand-off that failed
+outright. Checked again later: `attached=true, server_name='Music Assistant'`,
+with no further action from anyone. It landed; it was just slow.
+
+This produced two wrong fixes in a row before the right one, and the sequence is
+worth keeping:
+
+1. Never rescuing a server hand-off left a genuinely abandoned speaker orphaned.
+2. Rescuing as soon as the mesh said "unheld" stole the speaker back at ~t+60s,
+   before the server arrived — the tug-of-war §1 and rule 5 exist to prevent.
+
+The resolution is a hand-off grace of its own, `_SERVER_HANDOFF_GRACE_S`, an
+order of magnitude longer than the 45s a *stream* hand-off gets. Past it, with the
+mesh still reporting nothing holding the speaker, it is taken back and a warning
+names the server that did not take it. A hand-off predating a restart is left
+alone: the timestamp is in memory only, so the window cannot be timed, and
+guessing contests a server that may be holding the speaker happily.
+
+**Consequence for the UI, unresolved:** for those minutes the speaker reports
+`None` and offers no volume, because nothing holds it and that is the truth. A
+user who has just chosen "Music Assistant" sees the selection apparently not
+take. Showing the *intent* instead would be a lie whenever the hand-off never
+lands. Worth revisiting if it proves confusing in practice.
+
 ### AirPlay carries no metadata into the Sendspin group
 
 A speaker on a live AirPlay source showed transport and state but no title,
