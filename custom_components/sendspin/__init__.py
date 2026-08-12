@@ -39,6 +39,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: SendspinConfigEntry) -> 
 
     memo = PlayerMemo(hass)
     await memo.async_load()
+    if memo.repair_dial_urls():
+        await memo.async_save()
 
     try:
         host = await async_create_server_host(

@@ -163,3 +163,34 @@ async def test_the_memo_survives_a_restart(
     reloaded = await load(hass)
     assert reloaded.display_name(URL) == "Plum Amp100"
     assert reloaded.client_id(URL) == "player-7204"
+
+
+async def test_a_dial_url_on_the_wrong_address_family_is_repaired(
+    hass: HomeAssistant,
+) -> None:
+    """Refusing new bad relocations does not undo one already saved.
+
+    A speaker advertising over both IPv4 and IPv6 was once treated as having
+    moved, leaving it dialled at an address the mesh never reports — so every
+    lookup keyed on it missed and the speaker read as unavailable. Seen on a
+    real network, where a speaker ended up at fd00::… while the mesh described
+    it by its IPv4 address.
+    """
+    memo = await load(hass)
+    memo.remember_dial_url(URL, "ws://[fd00:1::dea6:32ff:fe2f:8080]:8928/sendspin")
+    assert memo.dial_url(URL) != URL
+
+    repaired = memo.repair_dial_urls()
+
+    assert repaired == [URL]
+    assert memo.dial_url(URL) == URL
+
+
+async def test_a_legitimate_relocation_is_left_alone(hass: HomeAssistant) -> None:
+    """A genuine new lease on the same family must survive the repair."""
+    memo = await load(hass)
+    moved = "ws://192.168.7.99:8928/sendspin"
+    memo.remember_dial_url(URL, moved)
+
+    assert memo.repair_dial_urls() == []
+    assert memo.dial_url(URL) == moved

@@ -55,6 +55,10 @@ async def async_get_config_entry_diagnostics(
                 "volume": snapshot.volume,
                 "muted": snapshot.muted,
                 "source": snapshot.source_label,
+                "media_title": snapshot.media_title,
+                "media_artist": snapshot.media_artist,
+                "media_playing": snapshot.media_playing,
+                "media_link": snapshot.media_link,
             }
             for snapshot in data.endpoints.values()
         ],
@@ -75,6 +79,21 @@ async def async_get_config_entry_diagnostics(
                 for source in mesh.sources
             ],
         },
+        "links": [
+            {
+                "key": key,
+                "url": link.url,
+                "connected": link.snapshot.connected,
+                "server": link.snapshot.server_name,
+                "server_id": link.snapshot.server_id,
+                "group_id": link.snapshot.group_id,
+                "playback_state": link.snapshot.playback_state,
+                "title": link.snapshot.title,
+                "artwork_bytes": len(link.snapshot.artwork or b""),
+                "commands": list(link.snapshot.supported_commands),
+            }
+            for key, link in coordinator.links.items()
+        ],
         "adoption": {
             "dialing": sorted(runtime.host.adopted_urls),
             "yielded": dict(runtime.host.yielded_urls),

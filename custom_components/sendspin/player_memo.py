@@ -114,6 +114,32 @@ class PlayerMemo:
         if (cleaned := _clean(client_id)) is not None:
             entry[_KEY_CLIENT_ID] = cleaned
 
+    def repair_dial_urls(self) -> list[str]:
+        """Undo a dial URL that points at a different address family.
+
+        A speaker advertising over both IPv4 and IPv6 was once treated as
+        having moved, leaving it dialled at an address the mesh never reports —
+        so every lookup keyed on it missed and the speaker read as unavailable.
+        Refusing new such relocations does not undo one already saved, so this
+        resets them on load.
+
+        Returns the endpoints that were repaired.
+        """
+        repaired: list[str] = []
+        for frozen_url, entry in self._data.items():
+            dial_url = entry.get(_KEY_DIAL_URL)
+            if dial_url and ("[" in str(dial_url)) != ("[" in frozen_url):
+                entry.pop(_KEY_DIAL_URL, None)
+                repaired.append(frozen_url)
+                _LOGGER.info(
+                    "Reset the address for Sendspin endpoint %s: it had been "
+                    "moved to %s, which is the same speaker on another network "
+                    "family",
+                    frozen_url,
+                    dial_url,
+                )
+        return repaired
+
     def remember_dial_url(self, frozen_url: str, dial_url: str) -> None:
         """Record where the speaker answers now, leaving its identity alone."""
         if dial_url == frozen_url:

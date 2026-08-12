@@ -164,7 +164,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # or a third-party speaker that appears in no unit's mesh view at
             # all. Such a server exposes no mesh API, so the only way to learn
             # what it is playing is to observe it directly.
-            for host in self._mesh_hosts:
+            for host in self._candidate_servers():
                 wanted[f"server:{host}"] = host
 
         for key in list(self._links):
@@ -196,6 +196,11 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             )
             self._links[key] = link
             link.async_start()
+
+    @property
+    def links(self) -> dict[str, LegacyControllerClient]:
+        """Every controller link, for diagnostics."""
+        return dict(self._links)
 
     def link_for(self, source_key: str | None) -> LegacyControllerClient | None:
         """The controller link observing a given source, if any."""
@@ -446,6 +451,23 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         device = registry.async_get_device(identifiers={(DOMAIN, frozen_url)})
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
+
+    def _candidate_servers(self) -> list[str]:
+        """Hosts worth observing for a server that might hold our speakers.
+
+        Discovered Sendspin servers, plus Home Assistant's own host: Music
+        Assistant is very commonly an add-on running beside Home Assistant, and
+        it does not necessarily advertise its Sendspin server over mDNS — in
+        which case discovery alone never finds the server holding a speaker.
+        """
+        hosts = list(self._mesh_hosts)
+        own = self.hass.config.internal_url or self.hass.config.external_url
+        if own:
+            from urllib.parse import urlsplit
+
+            if (hostname := urlsplit(own).hostname) and hostname not in hosts:
+                hosts.append(hostname)
+        return hosts
 
     def _sole_playing_link(self) -> str | None:
         """The only link with something playing, if there is exactly one."""
