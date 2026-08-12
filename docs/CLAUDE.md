@@ -15,9 +15,11 @@ and independently of Music Assistant.
   `manifest.json`).
 - **One `media_player` per physical speaker** — durable, adopted with explicit
   consent. Volume, mute and presence.
-- **Streams as a source dropdown** — available streams populate each speaker's
+- **Streams as a source dropdown** — *live* streams populate each speaker's
   `source_list`; `select_source` is the routing verb. Nothing is created or
-  destroyed in the entity registry when a stream starts or stops.
+  destroyed in the entity registry when a stream starts or stops. A unit
+  publishes every configured input, so the list is filtered on
+  `active or streaming` — see `docs/OPEN-QUESTIONS.md` §7.
 - **Availability as a first-class signal** — speaker presence maps onto entity
   availability, so automations trigger on a player dropping off the mesh
   natively, with no polling script.

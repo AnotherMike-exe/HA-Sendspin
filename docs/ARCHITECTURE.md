@@ -132,10 +132,25 @@ registry entries.
 go constantly; anchoring entities to them would churn the entity registry and
 discard the user's renames, areas and icons on every reconnect.
 
-Available streams instead populate each speaker's `source_list`, and
+**Live** streams instead populate each speaker's `source_list`, and
 `select_source` is the routing verb. Several speakers selecting the same source
 *is* the group — Sendspin's own semantics — so no grouping feature is
 advertised.
+
+"Live" is load-bearing. A Plum unit publishes every *configured input* as a
+source, so the list is filtered on `active or streaming` — an AirPlay endpoint
+with no sender is not somewhere a speaker can usefully be put. `None` is always
+offered, and whatever is currently selected is pinned even once it stops being
+live, so a stream ending under a routed speaker cannot leave the entity
+reporting a value absent from its own options. See
+[OPEN-QUESTIONS §7](OPEN-QUESTIONS.md#7-hardware-findings--m1-gate-2026-08-11),
+which records the measurement that reversed the original decision to list
+everything.
+
+Which source a speaker is on comes from matching its `group_id` against each
+source's, because `player_ids` is empty on every unit of a real mesh. That match
+is also the only way a routing change made elsewhere — Music Assistant, the Plum
+GUI — becomes visible here.
 
 ### 3.5. Controller links (`legacy_client.py`)
 
@@ -199,6 +214,15 @@ it is the user's consent record rather than integration state.
 | `aiosendspin` | Sendspin **server** role — adoption, groups, routing primitives | Python library, pinned `==9.1.0` |
 | (hand-written) | Sendspin **controller** role — now-playing, artwork, transport | `legacy_client.py`, plain JSON over a websocket |
 | Plum-Audio mesh API | Stream list and routing | HTTP, optional, auto-detected |
+
+**Source enumeration is Plum-only, by protocol necessity.** Sendspin defines no
+way to discover what a server is offering: mDNS carries only `path` and `name`,
+no message in the set is an inventory, `group/update` describes the single group
+the connection occupies, and a `switch` group-walk reaches only playing groups
+and reports them unnamed (measured against all three servers on the LAN — one
+anonymous group each). Plum's `/api/mesh/view` is the only enumerator that
+exists. On a mesh-free network the integration therefore publishes no
+`source_list`; adoption, presence, volume and now-playing all still work.
 | HA core `zeroconf` | mDNS discovery | Manifest `zeroconf` key → discovery flow |
 
 **Relevant `aiosendspin` calls** (per Plum-Audio prior art in

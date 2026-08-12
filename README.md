@@ -22,10 +22,13 @@ slice, on its own.
   whatever currently has it, so that is always your decision.
 - 🔊 **One `media_player` per physical speaker**, durable across reconnects and
   IP changes. Volume and mute where the speaker reports them.
-- 🔀 **Streams as a source dropdown.** Available streams populate each speaker's
-  source list; picking one hands the speaker to the unit running that stream.
-  Several speakers on the same source *is* a group — that is Sendspin's own
-  model, so there is no separate grouping control.
+- 🔀 **Streams as a source dropdown.** Streams that are actually playing populate
+  each speaker's source list; picking one hands the speaker to the unit running
+  that stream. Several speakers on the same source *is* a group — that is
+  Sendspin's own model, so there is no separate grouping control. A unit
+  advertises every input it has configured, so inputs with nothing connected to
+  them are filtered out: the dropdown holds what you can really route to, which
+  is sometimes just "None".
 - 📶 **Presence as availability**, so automations can trigger on a speaker
   dropping off the mesh with no polling script.
 - 🎵 **Now-playing, cover art and transport** — title, artist, album, a
@@ -33,6 +36,7 @@ slice, on its own.
   it**, including Music Assistant.
 - 🔁 **Both directions.** Other Sendspin servers appear in the same dropdown as
   your streams, so a speaker can be handed to Music Assistant and taken back.
+  Only servers you cannot already reach by naming a stream are listed.
 - 🤝 **It declines to fight.** If another Sendspin server takes a speaker back,
   the integration stops dialling and tells you, rather than starting a
   tug-of-war that degrades both. `sendspin.reclaim_player` overrides that when

@@ -262,14 +262,68 @@ found with `switch`.
    no pairing store.
 3. **Defer metadata.** Ship M4 without it and revisit when the servers upgrade.
 
-### Sources are routinely all-idle
+### Sources are routinely all-idle — and that is the signal, not a problem
 
 Every source across `unit-7204` and `unit-7122` read `active=False,
 streaming=False`, and the three bare players did not appear in any unit's
-`players` list. Filtering `source_list` to active sources would therefore have
-rendered an **empty dropdown**. Routing a speaker to an idle source is a normal
-workflow — assign it, then start playing — so `source_list` shows all sources
-with active ones sorted first.
+`players` list.
+
+**The conclusion originally drawn from this was wrong and has been reversed.** It
+read the all-idle mesh as proof that filtering would render an empty dropdown, so
+`source_list` listed all six sources with active ones sorted first. But a Plum
+unit publishes every *configured input* as a source whether or not a sender is
+connected — the flags are how it says which of them are real. Listing them all
+offered an AirPlay endpoint with nothing connected to it as though a speaker
+could usefully be put there, and one such phantom kept serving the retained
+metadata of a track that had long finished.
+
+Re-measured 2026-08-12 with one AirPlay sender running into `unit-7122`:
+
+```
+unit-7122  airplay-1   'VLAN7 AirPlay'   active=True   streaming=True   srcvol=20
+unit-7122  spotify-1   'VLan7 Spotify'   active=False  streaming=False
+unit-7204  airplay-1   '204 AP'          active=False  streaming=False
+    (…three more, all false)
+```
+
+The flags work, and exactly one source qualified. **`source_list` now filters on
+`active or streaming`**, and an empty-but-for-`None` dropdown is the correct
+answer when nothing is playing — which is also what the Plum GUI has always
+shown.
+
+Two details the filter depends on:
+
+- **`active or streaming`, never `streaming` alone.** `streaming` drops on a
+  pause, which would take a paused sender's source — and the user's selection —
+  out of the dropdown mid-track. `active` is the tolerant flag, held true for up
+  to `SOURCE_IDLE_TIMEOUT_S` (300s) after a sender walks away, and that tail is
+  the residual lag on a dead source disappearing.
+- **The current selection is pinned** into the list even once it stops being
+  live. Otherwise a stream ending under a routed speaker leaves the entity
+  reporting a source absent from its own options, which renders as blank.
+
+A frozen mesh view keeps its identities but stops asserting liveness after
+`_MESH_LIVENESS_TTL_S` (60s). An unreachable mesh must never read as every stream
+having ended, but "something is feeding this" is a claim about *now*.
+
+### `player_ids` is empty on real hardware, so membership comes from `group_id`
+
+Related, and the reason the above went unnoticed: `source.player_ids` and
+`unit.players` are `[]` on **every** unit of a live mesh. `source_for_player`
+matched on `player_ids` alone, so it never matched, so every speaker read as
+being on no stream — and an entity reported `source: 'Home'`, our own server's
+name, a value present in no dropdown.
+
+The signal that does exist is `local_player.group_id`, which equals the
+`group_id` of whichever source the speaker is on. Confirmed against the wire: a
+controller link to `unit-7122` reported group
+`21f06312-6e14-4e5a-9d28-133d84ef126e` as `playing`, the same id the mesh gives
+for that unit's `airplay-1`. Membership is now resolved by that match, keeping
+the `player_ids` match as the cheaper answer wherever a unit populates it.
+
+Because the group id moves whenever *anything* re-routes the speaker, this is
+also how a change made from Music Assistant or the Plum GUI becomes visible here,
+and how a return to none is detected rather than sticking.
 
 
 ---
