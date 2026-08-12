@@ -57,6 +57,10 @@ class EndpointSnapshot:
     """Audio is actually flowing on the assigned stream. We can know this even
     when another server holds the speaker, because it comes from the mesh."""
 
+    held_by_unit_host: str | None = None
+    """The Plum unit currently holding this speaker, if any. Volume has to be
+    commanded through whoever holds the connection."""
+
     routed_away: bool = False
     """The user deliberately handed this speaker to another unit. We must not
     dial it again on restart, or a reload would yank it back off the stream

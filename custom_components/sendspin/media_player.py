@@ -87,9 +87,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
         features = MediaPlayerEntityFeature(0)
 
-        # Volume and mute are commanded over OUR connection, so they need us to
-        # actually be holding the speaker.
-        if endpoint.connected:
+        # Volume goes over whichever connection exists: ours when we hold the
+        # speaker, otherwise the unit that does, via the mesh. Handing a speaker
+        # to a unit must not cost the user their volume control.
+        if endpoint.connected or endpoint.held_by_unit_host is not None:
             if endpoint.volume is not None:
                 features |= MediaPlayerEntityFeature.VOLUME_SET
             if endpoint.muted is not None:
@@ -244,14 +245,41 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         return attributes or None
 
     async def async_set_volume_level(self, volume: float) -> None:
-        """Command the speaker's volume."""
-        if (role := self._player_role()) is not None:
-            role.set_player_volume(round(volume * 100))
+        """Command the speaker's volume, through whoever is holding it."""
+        await self._async_command_volume(volume=round(volume * 100))
 
     async def async_mute_volume(self, mute: bool) -> None:
-        """Command the speaker's mute state."""
-        if (role := self._player_role()) is not None:
-            role.set_player_mute(mute)
+        """Command the speaker's mute state, through whoever is holding it."""
+        await self._async_command_volume(muted=mute)
+
+    async def _async_command_volume(
+        self, *, volume: int | None = None, muted: bool | None = None
+    ) -> None:
+        """Route a volume command over whichever connection exists."""
+        endpoint = self.endpoint
+        if endpoint is None:
+            return
+
+        if endpoint.connected and (role := self._player_role()) is not None:
+            if volume is not None:
+                role.set_player_volume(volume)
+            if muted is not None:
+                role.set_player_mute(muted)
+            return
+
+        if endpoint.held_by_unit_host is None or endpoint.client_id is None:
+            raise HomeAssistantError(
+                f"Nothing is holding {endpoint.name}, so its volume cannot be set"
+            )
+        await self._call_mesh(
+            self.coordinator.mesh.async_set_volume(
+                endpoint.held_by_unit_host,
+                endpoint.client_id,
+                volume=volume,
+                muted=muted,
+            )
+        )
+        await self.coordinator.async_refresh_mesh()
 
     def _player_role(self) -> object | None:
         """The live player role for this endpoint, if it is connected."""

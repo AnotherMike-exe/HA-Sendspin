@@ -29,6 +29,12 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 import voluptuous as vol
 
@@ -222,18 +228,43 @@ class PlayerSubentryFlow(ConfigSubentryFlow):
                     title=name, data={CONF_LISTENER_URL: frozen_url}
                 )
 
-        default = next(iter(available), vol.UNDEFINED)
+        # A dropdown of what was actually found, rather than a URL to type.
+        # `custom_value` keeps the manual path open for a speaker mDNS never
+        # showed — which is the whole reason the field accepts a URL at all.
+        options = [
+            SelectOptionDict(
+                value=url,
+                label=f"{found.txt_name or found.instance_name} ({found.host})",
+            )
+            for url, found in sorted(
+                available.items(),
+                key=lambda kv: (kv[1].txt_name or kv[1].instance_name).lower(),
+            )
+        ]
+        selector: Any = (
+            SelectSelector(
+                SelectSelectorConfig(
+                    options=options,
+                    custom_value=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                )
+            )
+            if options
+            else cv.string
+        )
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
-                {vol.Required(CONF_LISTENER_URL, default=default): cv.string}
+                {
+                    vol.Required(
+                        CONF_LISTENER_URL,
+                        default=next(iter(available), vol.UNDEFINED),
+                    ): selector
+                }
             ),
             errors=errors,
             description_placeholders={
-                "discovered": ", ".join(
-                    f"{found.txt_name or found.instance_name} ({url})"
-                    for url, found in available.items()
-                )
-                or "none seen yet"
+                "discovered": str(len(options)) if options else "no"
             },
         )

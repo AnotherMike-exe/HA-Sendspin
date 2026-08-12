@@ -41,12 +41,12 @@
       "step": {
         "user": {
           "title": "Adopt a Sendspin speaker",
-          "description": "Adopting a speaker makes Home Assistant its Sendspin server. If Music Assistant or another Sendspin server is currently using it, that server will lose it, and it may take it straight back. Home Assistant cannot play audio to a speaker in this version — adopting gives you volume, mute and presence.\n\nSeen on your network: {discovered}",
+          "description": "Adopting a speaker makes Home Assistant its Sendspin server. If Music Assistant or another Sendspin server is currently using it, that server will lose it, and it may take it straight back.\n\nFound {discovered} speakers on your network. Pick one, or enter the address of a speaker that did not appear.",
           "data": {
-            "listener_url": "Speaker address"
+            "listener_url": "Speaker"
           },
           "data_description": {
-            "listener_url": "The speaker's Sendspin address, for example ws://192.168.1.50:8928/sendspin"
+            "listener_url": "Pick a discovered speaker, or type an address such as ws://192.168.1.50:8928/sendspin"
           }
         }
       },

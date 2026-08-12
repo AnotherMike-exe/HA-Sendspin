@@ -55,6 +55,10 @@ _LOGGER = logging.getLogger(__name__)
 # Coalesce them so entities are written once, not five times.
 _EVENT_DEBOUNCE_S = 0.2
 
+# Mesh polls confirming a routed-away speaker is on no stream before we take it
+# back. More than one, because the mesh lags a routing call by a poll or two.
+_STRAND_CONFIRMATIONS = 3
+
 _INTERESTING_EVENTS = (
     ClientAddedEvent,
     ClientConnectedEvent,
@@ -98,6 +102,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         self._mesh = MeshClient(async_get_clientsession(hass))
         self._mesh_view = MeshView()
         self._mesh_hosts: list[str] = []
+        self._strand_checks: dict[str, int] = {}
         self._debouncer = Debouncer(
             hass,
             _LOGGER,
@@ -160,9 +165,56 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         view = await self._mesh.async_fetch_view(list(dict.fromkeys(hosts)))
         if not view.reachable:
             return
-        if view.sources != self._mesh_view.sources:
-            self._mesh_view = view
+        changed = (
+            view.sources != self._mesh_view.sources
+            or view.players != self._mesh_view.players
+        )
+        self._mesh_view = view
+        await self._async_rescue_stranded()
+        if changed:
             self.async_request_publish()
+
+    async def _async_rescue_stranded(self) -> None:
+        """Resume dialling a speaker whose hand-off did not stick.
+
+        Routing a speaker to another unit suppresses our dialling, otherwise a
+        restart would take it straight back. But if the mesh then reports the
+        speaker on no source at all, the hand-off is over — the stream ended,
+        or something else took the speaker — and leaving it suppressed strands
+        it: not held by us, not on a stream, and unavailable forever.
+
+        Confirmation is required over several polls, because immediately after
+        a routing call the mesh has not caught up yet and would look exactly
+        like a failure.
+        """
+        for frozen_url in self._endpoints:
+            if not self.memo.routed_away(frozen_url):
+                self._strand_checks.pop(frozen_url, None)
+                continue
+            client_id = self.memo.client_id(frozen_url)
+            if client_id is None:
+                # We have never seen this speaker attach, so we cannot tell
+                # whether a unit has it. Assuming the worst would take it off
+                # a stream it may well be happily playing.
+                self._strand_checks.pop(frozen_url, None)
+                continue
+            if self._mesh_view.source_for_player(client_id) is not None:
+                self._strand_checks.pop(frozen_url, None)
+                continue
+
+            misses = self._strand_checks.get(frozen_url, 0) + 1
+            self._strand_checks[frozen_url] = misses
+            if misses < _STRAND_CONFIRMATIONS:
+                continue
+
+            _LOGGER.info(
+                "Sendspin endpoint %s is on no stream any more; taking it back",
+                frozen_url,
+            )
+            self._strand_checks.pop(frozen_url, None)
+            self.memo.set_routed_away(frozen_url, False)
+            self.memo.async_schedule_save()
+            await self.host.async_adopt(self.memo.dial_url(frozen_url))
 
     @callback
     def async_stop(self) -> None:
@@ -296,9 +348,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
             volume: int | None = None
             muted: bool | None = None
+            held_by: str | None = None
             if connected and (role := player_role(client)) is not None:
                 volume = role.get_player_volume()
                 muted = role.get_player_muted()
+            elif (held := self._mesh_view.player_by_id(client_id)) is not None:
+                # A unit holds it, and reports what the speaker last told it.
+                volume, muted, held_by = held.volume, held.muted, held.unit_host
 
             assigned = self._mesh_view.source_for_player(client_id)
 
@@ -313,6 +369,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 muted=muted,
                 source_label=assigned.label if assigned is not None else None,
                 source_streaming=assigned.streaming if assigned is not None else False,
+                held_by_unit_host=held_by,
                 routed_away=self.memo.routed_away(frozen_url),
             )
 

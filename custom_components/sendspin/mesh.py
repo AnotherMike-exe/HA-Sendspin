@@ -76,10 +76,28 @@ class MeshSource:
 
 
 @dataclass(frozen=True, slots=True)
+class MeshPlayer:
+    """A speaker as a Plum-Audio unit currently sees it.
+
+    Only speakers a unit is *holding* appear. An idle speaker is in no unit's
+    list at all, which is why absence here says nothing about a speaker's
+    health.
+    """
+
+    player_id: str
+    unit_host: str
+    name: str
+    connected: bool = False
+    volume: int | None = None
+    muted: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MeshView:
     """Everything the mesh currently reports."""
 
     sources: tuple[MeshSource, ...] = ()
+    players: tuple[MeshPlayer, ...] = ()
     reachable: bool = False
     """False when no unit answered. Distinguishing this from "answered, and
     there is nothing" matters: a failed fetch must never be read as every
@@ -92,6 +110,12 @@ class MeshView:
     def source_by_label(self, label: str) -> MeshSource | None:
         """Look a source up by the label shown to the user."""
         return next((s for s in self.sources if s.label == label), None)
+
+    def player_by_id(self, client_id: str | None) -> MeshPlayer | None:
+        """A speaker as its holding unit reports it, if a unit holds it."""
+        if client_id is None:
+            return None
+        return next((p for p in self.players if p.player_id == client_id), None)
 
     def source_for_player(self, client_id: str | None) -> MeshSource | None:
         """Which source, if any, a speaker is currently assigned to."""
@@ -124,6 +148,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
     the same rather than assuming any field exists.
     """
     sources: list[MeshSource] = []
+    players: list[MeshPlayer] = []
     for unit in payload.get("units") or []:
         unit_id = unit.get("unit_id")
         if not unit_id:
@@ -153,7 +178,22 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     ),
                 )
             )
-    return MeshView(sources=tuple(sources), reachable=True)
+        for player in unit.get("players") or []:
+            player_id = player.get("player_id")
+            if not player_id:
+                continue
+            players.append(
+                MeshPlayer(
+                    player_id=player_id,
+                    unit_host=unit_host,
+                    name=player.get("name") or player_id,
+                    connected=_as_bool(player.get("connected"), True),
+                    # What the speaker last *reported*, not what was commanded.
+                    volume=player.get("volume"),
+                    muted=player.get("muted"),
+                )
+            )
+    return MeshView(sources=tuple(sources), players=tuple(players), reachable=True)
 
 
 class MeshClient:
@@ -218,6 +258,27 @@ class MeshClient:
         if client_id is not None:
             body["player_id"] = client_id
         await self._post(source.unit_host, "release", body)
+
+    async def async_set_volume(
+        self,
+        unit_host: str,
+        player_id: str,
+        *,
+        volume: int | None = None,
+        muted: bool | None = None,
+    ) -> None:
+        """Command a speaker's volume through the unit currently holding it.
+
+        Home Assistant can only command a speaker over its own connection, and
+        handing a speaker to a unit means giving that connection up. Without
+        this, routing a speaker would silently cost you the volume control.
+        """
+        body: dict[str, Any] = {"player_id": player_id}
+        if volume is not None:
+            body["volume"] = volume
+        if muted is not None:
+            body["muted"] = muted
+        await self._post(unit_host, "volume", body)
 
     async def _post(self, host: str, path: str, body: dict[str, Any]) -> None:
         """POST to a unit, raising something a service can surface."""

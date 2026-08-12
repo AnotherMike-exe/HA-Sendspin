@@ -125,8 +125,14 @@ async def test_a_discovered_speaker_is_offered_for_adoption(
     )
 
     assert result["type"] is FlowResultType.FORM
-    assert PLAYER_URL in result["description_placeholders"]["discovered"]
-    # Pre-filled, so adopting a discovered speaker is one click.
+    # A dropdown of what was found, not a URL to type. Listing discovered
+    # speakers only in the description text made the user hunt for an address.
+    selector = result["data_schema"].schema[CONF_LISTENER_URL]
+    options = selector.config["options"]
+    assert [o["value"] for o in options] == [PLAYER_URL]
+    assert options[0]["label"] == "Satellite1 (192.168.7.151)"
+    # Still possible to type an address for a speaker mDNS never showed.
+    assert selector.config["custom_value"] is True
     assert result["data_schema"]({})[CONF_LISTENER_URL] == PLAYER_URL
 
 

@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from aiosendspin.server.server import ClientDisconnectedEvent
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID, CONF_NAME
 from homeassistant.core import HomeAssistant
@@ -341,3 +342,117 @@ async def test_routing_a_speaker_away_survives_a_restart(
     assert fake_server.dial_calls == []
     # The entity still exists; we simply are not competing for the speaker.
     assert hass.states.async_entity_ids("media_player")
+
+
+# --- Volume must survive routing too ---------------------------------------
+
+
+async def test_volume_works_while_a_unit_holds_the_speaker(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Handing a speaker to a unit must not cost the user their volume control.
+
+    Home Assistant can only command a speaker over its own connection, and
+    routing gives that connection up — so the command goes through whichever
+    unit now holds it.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    payload["units"][0]["players"] = [
+        {
+            "player_id": CLIENT_ID,
+            "name": "Satellite1",
+            "connected": True,
+            "volume": 35,
+            "muted": False,
+        }
+    ]
+    await setup_with_mesh(hass, fake_server, payload)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(ClientDisconnectedEvent(client_id=CLIENT_ID, goodbye_reason=None))
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    # The level the holding unit reports is shown, not nothing.
+    assert state.attributes["volume_level"] == 0.35
+    assert state.attributes["supported_features"] & MediaPlayerEntityFeature.VOLUME_SET
+
+    set_volume = AsyncMock()
+    with (
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+            return_value=parse_view(payload),
+        ),
+        patch(
+            "custom_components.sendspin.mesh.MeshClient.async_set_volume", set_volume
+        ),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "volume_set",
+            {ATTR_ENTITY_ID: entity_id(hass), "volume_level": 0.5},
+            blocking=True,
+        )
+        await flush(hass)
+
+    set_volume.assert_awaited_once()
+    assert set_volume.await_args.args == ("192.168.7.204", CLIENT_ID)
+    assert set_volume.await_args.kwargs["volume"] == 50
+
+
+async def test_a_speaker_whose_hand_off_did_not_stick_is_taken_back(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A routed speaker on no stream must not be stranded forever.
+
+    Routing suppresses our dialling so a restart cannot yank the speaker back.
+    But if the stream then ends, leaving it suppressed means the speaker is
+    held by nobody, on nothing, and unavailable with no way back.
+    """
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    entry.runtime_data.memo.remember_handshake(
+        PLAYER_URL, name="Satellite1", client_id=CLIENT_ID
+    )
+    entry.runtime_data.memo.set_routed_away(PLAYER_URL, True)
+    fake_server.dial_calls.clear()
+
+    # The mesh keeps reporting it on no source at all.
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(FIXTURE),
+    ):
+        for _ in range(3):
+            await entry.runtime_data.coordinator.async_refresh_mesh()
+            await flush(hass)
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is False
+    assert PLAYER_URL in [c.url for c in fake_server.dial_calls]
+
+
+async def test_a_speaker_still_on_its_stream_is_left_alone(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The rescue must not fire while the hand-off is working.
+
+    Otherwise Home Assistant takes the speaker straight back off the stream the
+    user just put it on.
+    """
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"][0]["player_ids"] = [CLIENT_ID]
+    entry, _assign = await setup_with_mesh(hass, fake_server, payload)
+    entry.runtime_data.memo.remember_handshake(
+        PLAYER_URL, name="Satellite1", client_id=CLIENT_ID
+    )
+    entry.runtime_data.memo.set_routed_away(PLAYER_URL, True)
+    fake_server.dial_calls.clear()
+
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(payload),
+    ):
+        for _ in range(5):
+            await entry.runtime_data.coordinator.async_refresh_mesh()
+            await flush(hass)
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+    assert fake_server.dial_calls == []
