@@ -291,6 +291,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         )
         self._mesh_view = view
         self._async_sync_links()
+        self._async_drop_duplicate_links()
         if not self._stopped:
             await self._async_rescue_stranded()
         if changed:
@@ -452,6 +453,33 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         if device is not None and device.name != name:
             registry.async_update_device(device.id, name=name)
 
+    @callback
+    def _async_drop_duplicate_links(self) -> None:
+        """Close a second link to a server we already reach.
+
+        A server advertising over both IPv4 and IPv6 is discovered as two
+        hosts, and its identity is only known once a link connects — so the
+        duplicate can only be spotted afterwards. Left open it is a wasted
+        socket, and it makes one playing server look like two.
+        """
+        seen: dict[str, str] = {}
+        for key, link in list(self._links.items()):
+            server_id = link.snapshot.server_id
+            if server_id is None or not link.snapshot.connected:
+                continue
+            if (kept := seen.get(server_id)) is None:
+                seen[server_id] = key
+                continue
+            _LOGGER.debug(
+                "Closing duplicate Sendspin link %s; %s already reaches %s",
+                key,
+                kept,
+                server_id,
+            )
+            self.hass.async_create_task(
+                self._links.pop(key).async_stop(), "sendspin-link-dedupe"
+            )
+
     def _candidate_servers(self) -> list[str]:
         """Hosts worth observing for a server that might hold our speakers.
 
@@ -476,14 +504,20 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         # server look like a candidate — two candidates meant declining to
         # guess, and the speaker's now-playing flickered in and out as the idle
         # server's stale title came and went.
-        playing = [
-            key
-            for key, link in self._links.items()
-            if link.snapshot.connected
-            and link.snapshot.title is not None
-            and link.snapshot.playback_state == "playing"
-        ]
-        return playing[0] if len(playing) == 1 else None
+        #
+        # Counted per server rather than per link: one server advertising both
+        # an IPv4 and an IPv6 address yields two links to the same place, and
+        # two links reporting the same track is not two candidates.
+        playing: dict[str, str] = {}
+        for key, link in self._links.items():
+            snapshot = link.snapshot
+            if (
+                snapshot.connected
+                and snapshot.title is not None
+                and snapshot.playback_state == "playing"
+            ):
+                playing.setdefault(snapshot.server_id or key, key)
+        return next(iter(playing.values())) if len(playing) == 1 else None
 
     def is_connected(self, frozen_url: str) -> bool:
         """Whether we currently hold this endpoint."""

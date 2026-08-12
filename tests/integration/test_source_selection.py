@@ -751,3 +751,35 @@ async def test_binary_artwork_reaches_home_assistant(
 
     player = hass.data["media_player"].get_entity(entity_id(hass))
     assert await player.async_get_media_image() == (b"\xff\xd8jpegbytes", "image/jpeg")
+
+
+async def test_one_server_on_two_addresses_is_not_two_candidates(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A server advertising over IPv4 and IPv6 is discovered as two hosts.
+
+    Both links report the same track, which made a single playing server look
+    like two — so the rule declined and now-playing flickered out.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    fake_server.clients_by_id[CLIENT_ID].is_connected = False
+    fake_server.emit(
+        ClientDisconnectedEvent(
+            client_id=CLIENT_ID, goodbye_reason=GoodbyeReason.ANOTHER_SERVER
+        )
+    )
+
+    same = dict(
+        connected=True,
+        playback_state="playing",
+        title="I Remember",
+        server_id="unit-7204",
+    )
+    await observe_server(hass, entry, "192.168.7.204", ControllerSnapshot(**same))
+    await observe_server(
+        hass, entry, "fd00:1::dea6:32ff:fe2f:8080", ControllerSnapshot(**same)
+    )
+
+    assert hass.states.get(entity_id(hass)).attributes["media_title"] == "I Remember"
