@@ -75,6 +75,15 @@ _MESH_LIVENESS_TTL_S = 60.0
 # put it on.
 _ROUTING_GRACE_S = 45.0
 
+# How long to let a hand-off to a whole *server* settle before concluding it
+# failed. Far longer than the stream grace above, because it is not a call we
+# make — Sendspin has no verb for "give this speaker to that server", so all we
+# can do is let go and wait for the target to dial. Observed on hardware: Music
+# Assistant left a released speaker held by nothing for over four minutes and
+# then took it. Rescuing inside that window steals the speaker back before the
+# server arrives, which is the tug-of-war rule 5 exists to prevent.
+_SERVER_HANDOFF_GRACE_S = 600.0
+
 _INTERESTING_EVENTS = (
     ClientAddedEvent,
     ClientConnectedEvent,
@@ -388,16 +397,29 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
         Confirmation is required over several polls, because immediately after
         a routing call the mesh has not caught up yet and would look exactly
-        like a failure.
+        like a failure. A hand-off to a *server* gets a much longer window still
+        — see `_SERVER_HANDOFF_GRACE_S` — because we do not make that hand-off
+        happen, we only let go and wait for the target to dial.
         """
         now = self.hass.loop.time()
         for frozen_url in list(self._endpoints):
             if self._stopped:
                 return
-            routed_at = self._routed_at.get(frozen_url)
-            if routed_at is not None and now - routed_at < _ROUTING_GRACE_S:
-                continue  # too soon to tell a working hand-off from a failed one
             if not self.memo.routed_away(frozen_url):
+                self._strand_checks.pop(frozen_url, None)
+                self._routed_at.pop(frozen_url, None)
+                continue
+            handed_to = self.memo.handed_to_server(frozen_url)
+            routed_at = self._routed_at.get(frozen_url)
+            grace = _ROUTING_GRACE_S if handed_to is None else _SERVER_HANDOFF_GRACE_S
+            if routed_at is not None and now - routed_at < grace:
+                continue  # too soon to tell a working hand-off from a failed one
+            if handed_to is not None and routed_at is None:
+                # A server hand-off from before this restart. `_routed_at` is in
+                # memory only, so there is no way to know whether the window has
+                # passed — and taking the speaker back on a guess would contest a
+                # server that may well be holding it happily. Leave it: the user
+                # can select another source whenever they want it back.
                 self._strand_checks.pop(frozen_url, None)
                 continue
             dial_url = self.memo.dial_url(frozen_url)
@@ -411,7 +433,6 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 )
                 self._strand_checks.pop(frozen_url, None)
                 continue
-            handed_to = self.memo.handed_to_server(frozen_url)
             if (
                 handed_to is not None
                 and self._mesh_view.player_by_url(dial_url) is None

@@ -1216,7 +1216,9 @@ async def test_a_speaker_handed_to_a_server_is_not_taken_back(
     assert fake_server.live_dial_urls == set()
 
     # Well past the routing grace, and more polls than the strand threshold.
-    coordinator._routed_at.clear()
+    # Backdate the routing call rather than dropping it: an absent timestamp
+    # means "handed off before this restart", which is deliberately left alone.
+    coordinator._routed_at[PLAYER_URL] = hass.loop.time() - 10_000
     with no_real_links():
         for _ in range(_STRAND_CONFIRMATIONS + 2):
             await repoll(hass, entry, FIXTURE)
@@ -1276,7 +1278,9 @@ async def test_a_server_handoff_that_never_lands_is_taken_back(
     memo = entry.runtime_data.memo
     assert memo.handed_to_server(PLAYER_URL) == "Music Assistant"
 
-    coordinator._routed_at.clear()
+    # Backdate the routing call rather than dropping it: an absent timestamp
+    # means "handed off before this restart", which is deliberately left alone.
+    coordinator._routed_at[PLAYER_URL] = hass.loop.time() - 10_000
     with no_real_links():
         for _ in range(_STRAND_CONFIRMATIONS + 1):
             await repoll(hass, entry, seen)
@@ -1285,6 +1289,62 @@ async def test_a_server_handoff_that_never_lands_is_taken_back(
     assert memo.routed_away(PLAYER_URL) is False
     assert memo.handed_to_server(PLAYER_URL) is None
     assert PLAYER_URL in fake_server.live_dial_urls
+
+
+async def test_a_slow_server_handoff_is_not_interrupted(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Observed live: Music Assistant took over four minutes to dial.
+
+    For that whole window the mesh reported the speaker `attached: false` with no
+    server — indistinguishable from a hand-off that failed. Taking it back inside
+    the window steals it before the target arrives, which is the tug-of-war
+    rule 5 exists to prevent. A server hand-off therefore gets a much longer
+    grace than a stream one.
+    """
+    from custom_components.sendspin.legacy_client import ControllerSnapshot
+
+    seen = json.loads(json.dumps(FIXTURE))
+    seen["units"][0]["local_player"] = {
+        "player_id": CLIENT_ID,
+        "name": "Satellite1",
+        "url": PLAYER_URL,
+        "attached": False,
+    }
+    entry, _assign = await setup_with_mesh(hass, fake_server, seen)
+    coordinator = entry.runtime_data.coordinator
+    await observe_server(
+        hass,
+        entry,
+        "192.168.7.226",
+        ControllerSnapshot(
+            connected=True,
+            playback_state="stopped",
+            server_id="ma",
+            server_name="Music Assistant",
+        ),
+    )
+
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(seen),
+    ):
+        await hass.services.async_call(
+            "media_player",
+            "select_source",
+            {ATTR_ENTITY_ID: entity_id(hass), "source": "Music Assistant"},
+            blocking=True,
+        )
+        await flush(hass)
+
+    # Five minutes in: past every stream-level threshold, inside the server one.
+    coordinator._routed_at[PLAYER_URL] = hass.loop.time() - 300
+    with no_real_links():
+        for _ in range(_STRAND_CONFIRMATIONS + 2):
+            await repoll(hass, entry, seen)
+
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is True
+    assert PLAYER_URL not in fake_server.live_dial_urls
 
 
 async def test_a_server_that_did_take_the_speaker_keeps_it(
@@ -1341,7 +1401,9 @@ async def test_a_server_that_did_take_the_speaker_keeps_it(
     )
     await flush(hass)
 
-    coordinator._routed_at.clear()
+    # Backdate the routing call rather than dropping it: an absent timestamp
+    # means "handed off before this restart", which is deliberately left alone.
+    coordinator._routed_at[PLAYER_URL] = hass.loop.time() - 10_000
     with no_real_links():
         for _ in range(_STRAND_CONFIRMATIONS + 2):
             await repoll(hass, entry, held)
@@ -1385,7 +1447,9 @@ async def test_a_failed_stream_handoff_is_still_rescued(
     assert memo.handed_to_server(PLAYER_URL) is None
 
     # The mesh never shows it on the source, and nothing else claims it.
-    coordinator._routed_at.clear()
+    # Backdate the routing call rather than dropping it: an absent timestamp
+    # means "handed off before this restart", which is deliberately left alone.
+    coordinator._routed_at[PLAYER_URL] = hass.loop.time() - 10_000
     with no_real_links():
         for _ in range(_STRAND_CONFIRMATIONS + 1):
             await repoll(hass, entry, FIXTURE)
