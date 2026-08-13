@@ -343,6 +343,45 @@ Two things this settles:
   because an unrouted speaker is in no membership list. So both branches of the
   match agree, and keeping the direct one first costs nothing.
 
+### The now-playing flap was three bugs, and a dead flag hid one for three releases
+
+Reported as: select a source, get artwork and metadata, watch it fall to idle and
+come back, repeatedly. Also a dead AirPlay source showing the cover of the last
+thing Music Assistant played. One symptom, three causes, none of them a watchdog
+or a timeout:
+
+1. **`hunt_for_playing` was never read.** It was stored as `self._hunt` and
+   `_find_playing_group` ran for every link regardless, so a `ctrl:<source>`
+   link — which Plum has *already* placed on the group it was aimed at — fired
+   `switch` every four seconds and was moved off it. That is the four-second
+   cycle. `_SWITCH_REST_S` was likewise defined and never referenced.
+2. **`supported_commands` was clobbered.** Read as `... or ()`, so an absent key
+   became "no commands" where every neighbouring field treats absent as
+   unchanged. Any `server/state` carrying only a volume change stripped the
+   transport set, and Home Assistant said so out loud: *"Entity … is updating its
+   capabilities too often."*
+3. **Artwork outlived its stream.** Cover art is only cleared by an empty binary
+   frame, deliberately, so a pause does not blank it — but nothing cleared it on
+   a *group change*, so a moved link kept serving the old stream's art.
+
+**The lesson worth keeping is about the tests, not the code.** All 142 tests
+passed over (1) for three releases, because the two hunt tests asserted
+`client._hunt is False` — the value of the flag, not whether any `switch` reached
+the wire. A test that cannot fail when the behaviour is absent is not covering the
+behaviour. Both now drive a real connection against a fake socket and assert on
+what was sent.
+
+Confirmed on hardware afterwards: a speaker routed to a live AirPlay source held
+`state=playing`, one constant source, and `supported_features=18493` unchanged
+across fourteen samples over three and a half minutes, with the `ctrl:` link
+still on group `8cdd79b4-…` and zero capability warnings.
+
+**Deliberately not fixed:** `_sole_playing_link` still declines when two servers
+play different tracks, so a speaker attributed only by that rule loses its
+metadata when an unrelated server starts playing. Making the choice sticky would
+smooth it, at the cost of showing a known-wrong track on a speaker. Better no
+track than the wrong one — and there is a test asserting exactly that.
+
 ### Handing a speaker to a server is a request, not a command — and it is slow
 
 There is no Sendspin verb for "give this speaker to that server". Selecting a
