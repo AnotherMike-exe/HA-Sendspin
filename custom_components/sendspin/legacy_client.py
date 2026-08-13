@@ -237,8 +237,13 @@ class LegacyControllerClient:
             )
 
             self._switches = 0
-            sync = asyncio.create_task(self._time_sync_loop(ws))
-            hunt = asyncio.create_task(self._find_playing_group(ws))
+            tasks = [asyncio.create_task(self._time_sync_loop(ws))]
+            # Only a link with no source to name may hunt. A `ctrl:` link has
+            # already been placed on the group it was aimed at, and switching
+            # moves it straight off — which is what made a routed speaker's
+            # now-playing appear and vanish on a four second cycle.
+            if self._hunt:
+                tasks.append(asyncio.create_task(self._find_playing_group(ws)))
             try:
                 async for msg in ws:
                     if msg.type is WSMsgType.TEXT:
@@ -248,8 +253,8 @@ class LegacyControllerClient:
                     elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSED):
                         break
             finally:
-                sync.cancel()
-                hunt.cancel()
+                for task in tasks:
+                    task.cancel()
                 self._ws = None
 
     def _hello(self) -> dict[str, Any]:
@@ -297,15 +302,7 @@ class LegacyControllerClient:
         if kind == "server/state":
             self._on_server_state(payload)
         elif kind == "group/update":
-            self._publish(
-                replace(
-                    self._snapshot,
-                    group_id=payload.get("group_id", self._snapshot.group_id),
-                    playback_state=payload.get(
-                        "playback_state", self._snapshot.playback_state
-                    ),
-                )
-            )
+            self._on_group_update(payload)
         elif kind == "server/time":
             self._on_server_time(payload)
         elif kind in ("stream/end", "stream/clear"):
@@ -314,12 +311,53 @@ class LegacyControllerClient:
             # until the next track change.
             pass
 
+    def _on_group_update(self, payload: dict[str, Any]) -> None:
+        """Track which group this link is observing.
+
+        A *different* group is a different context, so anything carried over
+        from the last one has to go. Artwork especially: it is only ever cleared
+        by an empty binary frame, so without this a link moved to another group
+        kept serving the previous stream's cover under the new one's track — or
+        under no track at all.
+        """
+        group_id = payload.get("group_id", self._snapshot.group_id)
+        if group_id != self._snapshot.group_id:
+            self._publish(
+                ControllerSnapshot(
+                    server_name=self._snapshot.server_name,
+                    server_id=self._snapshot.server_id,
+                    group_id=group_id,
+                    playback_state=payload.get("playback_state"),
+                    supported_commands=self._snapshot.supported_commands,
+                    connected=self._snapshot.connected,
+                )
+            )
+            return
+        # Same group: only the playback state can have moved.
+        self._publish(
+            replace(
+                self._snapshot,
+                playback_state=payload.get(
+                    "playback_state", self._snapshot.playback_state
+                ),
+            )
+        )
+
     def _on_server_state(self, payload: dict[str, Any]) -> None:
         snapshot = self._snapshot
         if (controller := payload.get("controller")) is not None:
+            # Absent means unchanged, exactly as for every other field here.
+            # Treating it as "no commands" wiped the transport set on any
+            # controller block that omitted it, so the buttons — and the volume
+            # slider derived alongside them — disappeared and came back.
+            commands = controller.get("supported_commands")
             snapshot = replace(
                 snapshot,
-                supported_commands=tuple(controller.get("supported_commands") or ()),
+                supported_commands=(
+                    tuple(commands)
+                    if commands is not None
+                    else snapshot.supported_commands
+                ),
                 volume=controller.get("volume", snapshot.volume),
                 muted=controller.get("muted", snapshot.muted),
                 repeat=controller.get("repeat", snapshot.repeat),
@@ -393,27 +431,33 @@ class LegacyControllerClient:
         controller through the server's playing groups, and a controller has no
         player role, so moving between them affects no audio.
 
-        Stops as soon as something is playing, and is bounded — the cycle
-        ordering is not stable, and a server with nothing playing would
-        otherwise be asked forever.
+        Stops as soon as something is playing. Each sweep is bounded, because the
+        cycle ordering is not stable and a server with nothing playing would
+        otherwise be asked forever — but sweeps resume after a rest, or a server
+        that starts playing later would never be found.
         """
-        while self._switches < _SWITCH_ATTEMPTS:
-            await asyncio.sleep(_SWITCH_INTERVAL_S)
-            snapshot = self._snapshot
-            if snapshot.title is not None or snapshot.playback_state == "playing":
-                return
-            if "switch" not in snapshot.supported_commands:
-                return
-            self._switches += 1
-            try:
-                await ws.send_json(
-                    {
-                        "type": "client/command",
-                        "payload": {"controller": {"command": "switch"}},
-                    }
-                )
-            except ClientError, ConnectionError:
-                return
+        while not self._closing:
+            self._switches = 0
+            while self._switches < _SWITCH_ATTEMPTS:
+                await asyncio.sleep(_SWITCH_INTERVAL_S)
+                snapshot = self._snapshot
+                if snapshot.title is not None or snapshot.playback_state == "playing":
+                    return
+                if "switch" not in snapshot.supported_commands:
+                    return
+                self._switches += 1
+                try:
+                    await ws.send_json(
+                        {
+                            "type": "client/command",
+                            "payload": {"controller": {"command": "switch"}},
+                        }
+                    )
+                except ClientError, ConnectionError:
+                    return
+            # Swept everything this server offered and found nothing playing.
+            # Rest before going round again, rather than switching continuously.
+            await asyncio.sleep(_SWITCH_REST_S)
 
     async def _time_sync_loop(self, ws: Any) -> None:
         """Keep the server's clock, as the spec expects of a controller."""
