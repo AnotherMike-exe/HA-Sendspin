@@ -156,9 +156,11 @@ async def _async_release(call: ServiceCall) -> None:
 async def _async_reclaim(call: ServiceCall) -> None:
     """Take a speaker back from whatever currently holds it.
 
-    The deliberate escalation from a yielded adoption. Adoption dials politely
-    with `DISCOVERY` and gives up when another server claims the speaker; this
-    asserts a playback claim instead.
+    The deliberate escalation from a yielded adoption. Adoption gives up when
+    another server claims the speaker rather than starting a tug-of-war; this
+    clears that and dials again. Both assert the same playback claim — what the
+    user is overriding is the decision to stop competing, not the strength of
+    the claim.
     """
     hass = call.hass
     entry = _loaded_entry(hass)

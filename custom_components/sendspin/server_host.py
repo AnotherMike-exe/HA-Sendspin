@@ -69,17 +69,28 @@ _DIAL_TEARDOWN_TIMEOUT_S = 5.0
 # ANOTHER_SERVER is the one observed on hardware: dialling the Satellite1
 # handshook, then got ANOTHER_SERVER and never recovered across 30s of retries,
 # because Music Assistant re-dials harder. Two servers retrying at each other
-# is a tug-of-war that degrades both. Politeness does not help — this happened
-# with ConnectionReason.DISCOVERY, not PLAYBACK. See docs/OPEN-QUESTIONS.md §7.
+# is a tug-of-war that degrades both. See docs/OPEN-QUESTIONS.md §7.
+#
+# CONCURRENT_ATTEMPT is the upgraded-fleet equivalent, measured against a Plum
+# player on 9.1.x (docs/SPEC-UPGRADE-PLAN.md §3a): the player refuses roughly
+# 5ms after connecting because another server already holds it, and it does so
+# for *any* connection reason. Upstream marks this reason retryable
+# (server/connection.py:341-356, "may retry later"), which is reasonable for a
+# server polling for a speaker to free up and wrong here — our retry is
+# indefinite, and our rank cannot improve without a pairing record. Left out of
+# this set the flap counter below eventually catches it, but only after three
+# rounds of hammering a speaker somebody is using, and it reports the vague
+# "contested" where the player told us something exact.
 #
 # The others are terminal without user action, so retrying only generates noise.
 #
-# Everything else — SHUTDOWN, RESTART, USER_REQUEST, CONCURRENT_ATTEMPT, or no
-# reason at all — is transient. A speaker rebooting or a flaky network must
-# keep being retried, which is the whole point of retry_indefinitely.
+# Everything else — SHUTDOWN, RESTART, USER_REQUEST, or no reason at all — is
+# transient. A speaker rebooting or a flaky network must keep being retried,
+# which is the whole point of retry_indefinitely.
 _NON_RETRYABLE_GOODBYES: frozenset[GoodbyeReason] = frozenset(
     {
         GoodbyeReason.ANOTHER_SERVER,
+        GoodbyeReason.CONCURRENT_ATTEMPT,
         GoodbyeReason.UNAUTHORIZED,
         GoodbyeReason.PAIRING_REQUIRED,
         GoodbyeReason.UNPAIRED,
@@ -99,6 +110,11 @@ _FLAP_WINDOW_S = 120.0
 
 YIELD_CONTESTED = "contested"
 """Reason recorded when a speaker flaps rather than saying goodbye."""
+
+
+def _enum_value(value: object) -> object:
+    """Unwrap an enum for the diagnostics dump, passing None and plain values."""
+    return getattr(value, "value", value)
 
 
 def player_role(client: object) -> object | None:
@@ -191,14 +207,22 @@ class ServerHost:
         return self.server.get_client_id_for_url(dial_url)
 
     async def async_adopt(self, dial_url: str) -> None:
-        """Start holding a player, politely.
+        """Start holding a player.
 
-        `ConnectionReason.DISCOVERY` is deliberate. A `PLAYBACK` dial asserts a
-        claim that a player is expected to honour over whatever currently holds
-        it, and Home Assistant has no audio to justify that: adopting with
-        PLAYBACK would silently take speakers away from Music Assistant. The
-        explicit "take it anyway" path is `async_reclaim`, which the user has
-        to ask for. See docs/OPEN-QUESTIONS.md §1.
+        `ConnectionReason.PLAYBACK` is deliberate, and reverses this
+        integration's original choice. `DISCOVERY` was chosen as politeness, on
+        the belief that `PLAYBACK` would rudely take a speaker that `DISCOVERY`
+        would leave alone. Measured against the whole fleet, the opposite is
+        true: `DISCOVERY` is refused by every speaker on the network — ESPHome
+        endpoints answer `ANOTHER_SERVER`, upgraded Plum players answer
+        `CONCURRENT_ATTEMPT` — while the same speakers accept a `PLAYBACK` dial
+        and hand over their full role set. Politeness bought no gentler
+        outcome, it bought no outcome. See docs/SPEC-UPGRADE-PLAN.md §4a.
+
+        What actually protects against taking a speaker somebody is using is
+        unchanged: nothing is ever auto-dialled, adoption is an explicit and
+        warned user action, and `ANOTHER_SERVER` still ends the dial rather
+        than starting a tug-of-war.
 
         Stops any existing dialer first, because `connect_to_client` is a
         silent no-op while one exists.
@@ -213,7 +237,7 @@ class ServerHost:
         _LOGGER.debug("Adopting Sendspin player at %s", dial_url)
         self.server.connect_to_client(
             dial_url,
-            connection_reason=ConnectionReason.DISCOVERY,
+            connection_reason=ConnectionReason.PLAYBACK,
             retry_initial_connection=True,
             retry_indefinitely=True,
         )
@@ -226,18 +250,85 @@ class ServerHost:
         _LOGGER.debug("Releasing Sendspin player at %s", dial_url)
         await self._async_stop_dialing(dial_url)
 
-    async def async_reclaim(self, client_id: str, timeout_s: float = 30.0) -> bool:
-        """Assert a playback claim on a player another server has taken.
+    async def async_reclaim(
+        self,
+        client_id: str,
+        timeout_s: float = 30.0,
+    ) -> bool:
+        """Take a player back from whatever currently holds it.
 
         This is the escalation from a yielded adoption: the user has been told
         another server holds the speaker and has asked for it anyway.
 
-        Synchronous upstream: it dials and arms a timeout, it does not wait for
-        the player to land. Callers that need to know it arrived must poll.
+        Deliberately re-dials through `async_adopt` rather than upstream's
+        `reclaim_client_for_playback`. Both now assert the same playback claim,
+        so the only thing upstream's version adds is resolving the URL from the
+        library's own client registry — which `_on_server_event` evicts on
+        yield, so reclaiming would fail for exactly the speakers that were given
+        up. That is the only case the service exists for.
+
+        Returns False when the client id resolves to no URL we could dial,
+        which the service surfaces rather than failing silently.
+
+        Does not wait for the player to land: dialling is asynchronous and the
+        speaker may be slow to answer, so callers that need to know it arrived
+        must watch the entity. `timeout_s` is retained for the service schema.
         """
-        if (url := self._url_by_client_id.get(client_id)) is not None:
-            self._yielded.pop(url, None)
-        return self.server.reclaim_client_for_playback(client_id, timeout_s=timeout_s)
+        url = self._url_for_client_id(client_id)
+        if url is None:
+            _LOGGER.debug("Cannot reclaim %s: no known listener URL", client_id)
+            return False
+        await self.async_adopt(url)
+        return True
+
+    def client_diagnostics(self) -> list[dict[str, object]]:
+        """What the server knows about each client, for the diagnostics dump.
+
+        Every field here decided something during the 2026-08-15 fleet
+        measurement and none of them were visible without attaching a debugger
+        (docs/SPEC-UPGRADE-PLAN.md §0). The two that matter most:
+
+        - **`active_roles` empty on a connected client** is the signature of an
+          unpaired encrypted dial. It is admitted rather than refused, so the
+          speaker looks adopted and available while being completely inert.
+        - **`unpaired_access` and `trust_level`** together decide whether a
+          speaker can ever be driven without a pairing record.
+
+        Read defensively: a legacy cleartext connection has no PSK category and
+        therefore no `connection_security` at all, and a client that never
+        completed a hello has no `info`.
+        """
+        diagnostics: list[dict[str, object]] = []
+        for client in self.server.clients:
+            info = getattr(client, "info_or_none", None)
+            security = getattr(client, "connection_security", None)
+            connection = getattr(client, "connection", None)
+            unpaired = getattr(info, "unpaired_access", None)
+            goodbye = getattr(connection, "goodbye_reason", None)
+            diagnostics.append(
+                {
+                    "client_id": client.client_id,
+                    "name": getattr(client, "name", None),
+                    "connected": getattr(client, "is_connected", None),
+                    # Empty while connected means adopted but inert.
+                    "active_roles": list(getattr(client, "active_role_ids", []) or []),
+                    "negotiated_roles": list(
+                        getattr(client, "negotiated_role_ids", []) or []
+                    ),
+                    "is_paired": getattr(client, "is_paired", None),
+                    "is_encrypted": getattr(connection, "is_encrypted", None),
+                    "trust_level": _enum_value(getattr(security, "trust_level", None)),
+                    "psk_category": _enum_value(
+                        getattr(security, "psk_category", None)
+                    ),
+                    "unpaired_access": getattr(unpaired, "enabled", None),
+                    "last_goodbye": _enum_value(goodbye),
+                    "software_version": getattr(
+                        getattr(info, "device_info", None), "software_version", None
+                    ),
+                }
+            )
+        return diagnostics
 
     async def async_close(self) -> None:
         """Tear down every dialer, then the server.
@@ -284,6 +375,13 @@ class ServerHost:
             url,
             reason,
         )
+        # Release the client object with the dial. Upstream retains it and sets
+        # `_cleanup_on_mdns_removal`, waiting for its own mDNS browser to fire —
+        # but this integration never starts that browser (it is deliberately
+        # silent on mDNS), so nothing ever reads the flag and yielded clients
+        # accumulate for the life of the process. `_url_by_client_id` keeps the
+        # mapping, which is what `async_reclaim` resolves against afterwards.
+        self.server.remove_client(event.client_id)
         self.hass.async_create_task(
             self._async_stop_dialing(url), f"sendspin-stop-dial-{url}"
         )

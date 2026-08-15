@@ -29,15 +29,21 @@ settled. Shipping a service that races two servers is worse than not shipping it
 **Resolved by refusing to participate.** The spec gap is untouched — it is not
 ours to close — but the integration no longer has undefined behaviour:
 
-- Adoption dials with `ConnectionReason.DISCOVERY`, never `PLAYBACK`. Home
-  Assistant has no audio to justify asserting a claim.
 - A discovered speaker is **never** adopted automatically.
-- A `GoodbyeReason.ANOTHER_SERVER` ends the dial and surfaces "another server
-  holds this", instead of retrying into a tug-of-war.
+- A `GoodbyeReason.ANOTHER_SERVER` or `CONCURRENT_ATTEMPT` ends the dial and
+  surfaces who holds it, instead of retrying into a tug-of-war.
 - `sendspin.reclaim_player` is the explicit override, which the user asks for.
 
-Confirmed live: politeness does **not** protect a contested speaker (§7). It
-only stops us making the contest worse.
+> **Superseded 2026-08-15.** This section used to open with "adoption dials
+> `ConnectionReason.DISCOVERY`, never `PLAYBACK`", on the reasoning that Home
+> Assistant has no audio to justify asserting a claim. Measured across the whole
+> fleet, a `DISCOVERY` dial is refused by every speaker on the network while a
+> `PLAYBACK` dial is admitted with the full role set, so adoption now dials
+> `PLAYBACK`. See `docs/SPEC-UPGRADE-PLAN.md` §4a.
+>
+> The conclusion below was right for the wrong reason and still stands: politeness
+> does **not** protect a contested speaker. It turns out it does not protect an
+> uncontested one either — it simply fails. **Explicit consent** is the protection.
 
 ---
 
@@ -178,6 +184,13 @@ It never reconnected across 30s of retries: Music Assistant re-dials harder.
 This is §1's arbitration gap, live — and it happened despite dialling with
 `ConnectionReason.DISCOVERY` rather than `PLAYBACK`, so **politeness does not
 protect a contested device**.
+
+> **Read this with 2026-08-15 in hand.** The same speaker was re-dialled after
+> the fleet upgrade: `DISCOVERY` still produced exactly this `ANOTHER_SERVER`
+> refusal, but `PLAYBACK` was **admitted** and held it with
+> `player@v1` + `controller@v1` active. So this measurement does not say a
+> contested speaker cannot be taken — it says a `DISCOVERY` dial cannot take
+> one. `docs/SPEC-UPGRADE-PLAN.md` §4a has the full fleet.
 
 **Design consequence:** a `GoodbyeReason.ANOTHER_SERVER` goodbye must stop the
 retry loop and surface "another server holds this" to the user, rather than

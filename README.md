@@ -130,9 +130,11 @@ already run MA, you probably want MA. If you want Sendspin control without
 adopting MA's whole ecosystem, you want this.
 
 The two do not share nicely by design: a Sendspin speaker answers to one server
-at a time, and adopting one here takes it away from Music Assistant. The
-protocol offers no way to negotiate that, so this integration is deliberately
-polite — it asks, and gives up if refused.
+at a time, and **adopting one here takes it away from Music Assistant.** The
+protocol offers no way to negotiate that, so the safeguard is consent rather
+than restraint: nothing is ever adopted on its own, and once another server
+takes a speaker back this integration stops competing instead of starting a
+tug-of-war. `sendspin.reclaim_player` is how you ask for it anyway.
 
 ## License
 

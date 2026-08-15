@@ -107,4 +107,8 @@ async def async_get_config_entry_diagnostics(
             "dialing": sorted(runtime.host.adopted_urls),
             "yielded": dict(runtime.host.yielded_urls),
         },
+        # The server's own view of each speaker's handshake: roles, trust and
+        # the last goodbye. A connected client with no active roles is adopted
+        # but inert, which nothing else here would reveal.
+        "clients": runtime.host.client_diagnostics(),
     }

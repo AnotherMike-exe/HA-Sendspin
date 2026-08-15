@@ -72,12 +72,21 @@ class FakeSendspinClient:
         *,
         is_connected: bool = True,
         role: FakePlayerRole | None = None,
+        active_role_ids: list[str] | None = None,
     ) -> None:
-        """Create the fake client."""
+        """Create the fake client.
+
+        `active_role_ids` defaults to the player role a healthy speaker
+        negotiates. An explicitly empty list models the inert case: a client
+        that is connected but was activated with no roles at all.
+        """
         self.client_id = client_id
         self.name = name
         self.is_connected = is_connected
         self.player = role if role is not None else FakePlayerRole()
+        self.active_role_ids = (
+            ["player@v1"] if active_role_ids is None else active_role_ids
+        )
 
     def roles_by_family(self, family: str) -> list[FakePlayerRole]:
         """Only the player family is modelled."""
@@ -101,6 +110,7 @@ class FakeSendspinServer:
         self.dials_started: list[str] = []
         self.disconnect_calls: list[str] = []
         self.reclaim_calls: list[tuple[str, float]] = []
+        self.removed_clients: list[str] = []
         self.client_ids_by_url: dict[str, str] = {}
         self.clients_by_id: dict[str, FakeSendspinClient] = {}
         self.closed = False
@@ -114,6 +124,7 @@ class FakeSendspinServer:
         volume: int | None = None,
         muted: bool | None = None,
         is_connected: bool = True,
+        active_role_ids: list[str] | None = None,
     ) -> FakeSendspinClient:
         """Register a client answering on a URL, as if it had connected."""
         client = FakeSendspinClient(
@@ -121,6 +132,7 @@ class FakeSendspinServer:
             name,
             is_connected=is_connected,
             role=FakePlayerRole(volume=volume, muted=muted),
+            active_role_ids=active_role_ids,
         )
         self.client_ids_by_url[url] = client_id
         self.clients_by_id[client_id] = client
@@ -129,6 +141,11 @@ class FakeSendspinServer:
     def get_client(self, client_id: str) -> FakeSendspinClient | None:
         """Look a client up by id."""
         return self.clients_by_id.get(client_id)
+
+    @property
+    def clients(self) -> list[FakeSendspinClient]:
+        """Every known client, connected or not — as upstream reports them."""
+        return list(self.clients_by_id.values())
 
     def add_event_listener(
         self, callback: Callable[[object, object], None]
@@ -191,6 +208,16 @@ class FakeSendspinServer:
         """Record a playback claim."""
         self.reclaim_calls.append((client_id, timeout_s))
         return True
+
+    def remove_client(self, client_id: str) -> None:
+        """Forget a client entirely, as upstream does on an explicit removal.
+
+        Upstream only reaches this by itself via the mDNS browser, which this
+        integration never starts — so a yielded client is retained for the life
+        of the process unless something calls this.
+        """
+        self.removed_clients.append(client_id)
+        self.clients_by_id.pop(client_id, None)
 
     def get_client_id_for_url(self, url: str) -> str | None:
         """Resolve a dial URL to the client answering on it."""

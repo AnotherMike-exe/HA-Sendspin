@@ -104,11 +104,21 @@ These encode traps this project **will** hit. They are not style preferences.
    `manifest.json` and `const.py` must stay in sync, as must the runtime
    requirements mirrored into `requirements-dev.txt`.
 5. **Never auto-dial a discovered speaker.** Adoption takes it from whatever
-   holds it, and a player always yields to the newest dialer *regardless of
-   connection reason* — observed live against Music Assistant, using the polite
-   `DISCOVERY` reason. Adoption is always an explicit, warned user action, and a
-   `GoodbyeReason.ANOTHER_SERVER` must end the dial rather than start a
-   tug-of-war.
+   holds it, so it is always an explicit, warned user action, and a
+   `GoodbyeReason.ANOTHER_SERVER` or `CONCURRENT_ATTEMPT` must end the dial
+   rather than start a tug-of-war.
+
+   **The connection reason is decisive, and it is `PLAYBACK`.** This rule
+   previously said a player yields to the newest dialer regardless of reason,
+   and dialled `DISCOVERY` out of politeness. Measured across the whole fleet on
+   2026-08-15, the opposite holds: a `DISCOVERY` dial is refused by *every*
+   speaker on the network — ESPHome endpoints answer `ANOTHER_SERVER`, upgraded
+   Plum players answer `CONCURRENT_ATTEMPT` — while a `PLAYBACK` dial is
+   admitted with the full role set. Politeness bought no gentler outcome, it
+   bought no outcome. See `docs/SPEC-UPGRADE-PLAN.md` §4a.
+
+   Explicit consent, not a weak connection reason, is what protects a speaker
+   somebody else is using.
 6. **Read `docs/OPEN-QUESTIONS.md` before building routing, identity or
    metadata code.** §7 records what the hardware actually did, including the
    one item that currently blocks metadata entirely.

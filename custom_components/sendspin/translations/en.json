@@ -81,7 +81,7 @@
     },
     "reclaim_player": {
       "name": "Reclaim speaker",
-      "description": "Takes a speaker back from whichever server currently holds it. Adoption is deliberately polite and gives up when another server claims a speaker; this overrides that.",
+      "description": "Takes a speaker back from whichever server currently holds it. Adoption stops competing when another server claims a speaker; this asks Home Assistant to try again.",
       "fields": {
         "device_id": {
           "name": "Speaker",

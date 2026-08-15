@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from aiosendspin.models.types import ConnectionReason
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
@@ -186,11 +187,18 @@ async def test_release_stops_holding_the_speaker(
     assert fake_server.live_dial_urls == set()
 
 
-async def test_reclaim_asserts_a_playback_claim(
+async def test_reclaim_redials_the_speaker(
     hass: HomeAssistant, fake_server: FakeSendspinServer
 ) -> None:
-    """The escalation from a yielded adoption, which the user has to ask for."""
+    """The escalation from a yielded adoption, which the user has to ask for.
+
+    Asserted as a fresh dial rather than as a call to upstream's
+    `reclaim_client_for_playback`: yielding now evicts the client from the
+    library's registry, which is what that call resolves its URL against, so
+    reclaim goes back through the ordinary dialling path.
+    """
     await setup_hub(hass, fake_server, adopted=True)
+    fake_server.dial_calls.clear()
 
     await hass.services.async_call(
         DOMAIN,
@@ -200,7 +208,9 @@ async def test_reclaim_asserts_a_playback_claim(
     )
     await hass.async_block_till_done()
 
-    assert fake_server.reclaim_calls == [(CLIENT_ID, 5.0)]
+    assert [call.url for call in fake_server.dial_calls] == [PLAYER_URL]
+    assert fake_server.dial_calls[0].connection_reason is ConnectionReason.PLAYBACK
+    assert fake_server.live_dial_urls == {PLAYER_URL}
 
 
 async def test_targeting_an_unknown_device_is_a_clear_error(
