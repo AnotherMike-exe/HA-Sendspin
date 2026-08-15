@@ -491,3 +491,70 @@ async def test_hunting_rests_instead_of_switching_forever(monkeypatch) -> None:
 
     # More than one sweep's worth, so it came back round after resting.
     assert len(switch_commands(ws)) > 2
+
+
+def make_pinned_client(updates: list[ControllerSnapshot]) -> LegacyControllerClient:
+    """A `ctrl:` link, aimed at one source and never switching itself."""
+    return LegacyControllerClient(
+        session=None,
+        url="ws://192.168.7.204:8927/sendspin",
+        client_name="Home Assistant",
+        client_id="ctrl:airplay-1:hatest",
+        on_update=updates.append,
+        hunt_for_playing=False,
+    )
+
+
+def test_a_pinned_link_keeps_the_metadata_it_was_placed_with() -> None:
+    """Placement moves a `ctrl:` link *after* sending the track it is being sent to.
+
+    Captured against Plum-Audio 9.1.x, in this order: metadata, then two
+    `group/update`s ending in the targeted source's group, then artwork. The
+    server does not repeat the metadata once the move lands, so treating each
+    move as a new context discarded the only metadata this link would ever
+    receive — a routed speaker showed a running progress bar with no title,
+    while a hunting link to the same unit showed the track.
+    """
+    client = make_pinned_client([])
+
+    client._on_text(
+        {
+            "type": "server/state",
+            "payload": {"metadata": {"title": "Easy Way Out", "artist": "Qbomb"}},
+        }
+    )
+    client._on_text(
+        {
+            "type": "group/update",
+            "payload": {"group_id": "transient", "playback_state": "stopped"},
+        }
+    )
+    client._on_text(
+        {
+            "type": "group/update",
+            "payload": {"group_id": "55e8f5b1", "playback_state": "playing"},
+        }
+    )
+
+    assert client.snapshot.group_id == "55e8f5b1"
+    assert client.snapshot.playback_state == "playing"
+    assert client.snapshot.title == "Easy Way Out"
+    assert client.snapshot.artist == "Qbomb"
+
+
+def test_a_hunting_link_still_drops_metadata_when_it_moves() -> None:
+    """The protection stays where it was earned.
+
+    A hunting link switches groups on purpose, so carrying a track across a move
+    is exactly the bug that put a dead AirPlay source under Music Assistant's
+    cover art.
+    """
+    client = make_client([])
+    client._on_text({"type": "group/update", "payload": {"group_id": "g1"}})
+    client._on_text(
+        {"type": "server/state", "payload": {"metadata": {"title": "I Remember"}}}
+    )
+
+    client._on_text({"type": "group/update", "payload": {"group_id": "g2"}})
+
+    assert client.snapshot.title is None

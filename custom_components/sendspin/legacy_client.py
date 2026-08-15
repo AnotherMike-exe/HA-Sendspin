@@ -314,14 +314,31 @@ class LegacyControllerClient:
     def _on_group_update(self, payload: dict[str, Any]) -> None:
         """Track which group this link is observing.
 
-        A *different* group is a different context, so anything carried over
-        from the last one has to go. Artwork especially: it is only ever cleared
-        by an empty binary frame, so without this a link moved to another group
-        kept serving the previous stream's cover under the new one's track — or
-        under no track at all.
+        For a **hunting** link a *different* group is a different context, so
+        anything carried over from the last one has to go. Artwork especially:
+        it is only ever cleared by an empty binary frame, so without this a link
+        moved to another group kept serving the previous stream's cover under
+        the new one's track — or under no track at all.
+
+        A **pinned** `ctrl:` link is the opposite case and must not clear.
+        It never moves itself; a group change is the server placing it where it
+        was aimed. Observed against Plum-Audio 9.1.x, placement arrives in this
+        order:
+
+            server/state metadata  'Easy Way Out'
+            group/update  stopped  <transient>
+            group/update  playing  <the targeted source's group>
+            <artwork frame>
+
+        The metadata describes the destination and is sent *before* the move
+        completes, and the server does not repeat it afterwards. Clearing on
+        those two moves discarded the only metadata the link would ever get, so
+        a routed speaker showed a live progress bar with no title and no artist
+        — while the hunting link to the same unit displayed the track, because
+        switching earns it a fresh metadata frame.
         """
         group_id = payload.get("group_id", self._snapshot.group_id)
-        if group_id != self._snapshot.group_id:
+        if self._hunt and group_id != self._snapshot.group_id:
             self._publish(
                 ControllerSnapshot(
                     server_name=self._snapshot.server_name,
@@ -333,10 +350,12 @@ class LegacyControllerClient:
                 )
             )
             return
-        # Same group: only the playback state can have moved.
+        # Same group, or a pinned link being placed: only the group and its
+        # playback state have moved, and what the stream is playing survives.
         self._publish(
             replace(
                 self._snapshot,
+                group_id=group_id,
                 playback_state=payload.get(
                     "playback_state", self._snapshot.playback_state
                 ),
