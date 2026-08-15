@@ -209,12 +209,17 @@ class FakeSendspinServer:
         self.reclaim_calls.append((client_id, timeout_s))
         return True
 
-    def remove_client(self, client_id: str) -> None:
+    async def remove_client(self, client_id: str) -> None:
         """Forget a client entirely, as upstream does on an explicit removal.
 
         Upstream only reaches this by itself via the mDNS browser, which this
         integration never starts — so a yielded client is retained for the life
         of the process unless something calls this.
+
+        **Async on purpose.** Upstream awaits `group.remove_client` inside this,
+        so it is a coroutine — and the event callback that wants to call it is
+        synchronous. A sync fake here let a fire-and-forget call pass the tests
+        and then do nothing on hardware but log "coroutine was never awaited".
         """
         self.removed_clients.append(client_id)
         self.clients_by_id.pop(client_id, None)

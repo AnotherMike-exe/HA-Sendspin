@@ -375,16 +375,29 @@ class ServerHost:
             url,
             reason,
         )
-        # Release the client object with the dial. Upstream retains it and sets
-        # `_cleanup_on_mdns_removal`, waiting for its own mDNS browser to fire —
-        # but this integration never starts that browser (it is deliberately
-        # silent on mDNS), so nothing ever reads the flag and yielded clients
-        # accumulate for the life of the process. `_url_by_client_id` keeps the
-        # mapping, which is what `async_reclaim` resolves against afterwards.
-        self.server.remove_client(event.client_id)
         self.hass.async_create_task(
-            self._async_stop_dialing(url), f"sendspin-stop-dial-{url}"
+            self._async_yield(url, event.client_id), f"sendspin-yield-{url}"
         )
+
+    async def _async_yield(self, dial_url: str, client_id: str) -> None:
+        """Stop dialling a speaker we have given up, and release its client.
+
+        Upstream retains a client after a goodbye and sets
+        `_cleanup_on_mdns_removal`, waiting for its own mDNS browser to fire —
+        but this integration never starts that browser (it is deliberately
+        silent on mDNS), so nothing reads the flag and yielded clients
+        accumulate for the life of the process.
+
+        `remove_client` is a coroutine, so this has to be a task rather than a
+        call from the synchronous event callback. Fired and forgotten it does
+        nothing at all beyond logging "coroutine was never awaited", which is
+        how it first reached hardware.
+
+        Removal also drops upstream's own `client_id -> url` mapping, which is
+        why `async_reclaim` resolves against `_url_by_client_id` instead.
+        """
+        await self._async_stop_dialing(dial_url)
+        await self.server.remove_client(client_id)
 
     def _yield_reason(self, url: str, goodbye: GoodbyeReason | None) -> str | None:
         """Decide whether this disconnect means we should stop dialling.
