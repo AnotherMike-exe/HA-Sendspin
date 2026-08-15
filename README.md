@@ -98,6 +98,10 @@ Routing is not a service — it is `media_player.select_source` on the speaker.
 - [Architecture](docs/ARCHITECTURE.md) — system design and key decisions
 - [Open Questions](docs/OPEN-QUESTIONS.md) — unresolved blockers, and what the
   hardware actually did
+- [Encryption-Era Upgrade Plan](docs/SPEC-UPGRADE-PLAN.md) — what changes as the
+  fleet moves to Noise, and what does not
+- [Routing Restoration Plan](docs/ROUTING-RESTORATION-PLAN.md) — the work to get
+  every endpoint class routable and controllable again
 - [Deployment & Test Loop](docs/DEPLOYMENT-TESTING.md) — how changes reach a live instance
 - [Development Guide](docs/DEV-SETUP.md) — environment setup
 - [CLAUDE.md](CLAUDE.md) — Claude Code project memory
