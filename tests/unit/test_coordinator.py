@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import MagicMock
 
 from aiosendspin.models.types import GoodbyeReason
 from aiosendspin.noise.keys import Identity
@@ -21,6 +22,8 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.sendspin.const import DOMAIN
 from custom_components.sendspin.coordinator import SendspinCoordinator
+from custom_components.sendspin.legacy_client import ControllerSnapshot
+from custom_components.sendspin.mesh import parse_view
 from custom_components.sendspin.player_memo import PlayerMemo
 from custom_components.sendspin.server_host import ServerHost
 from tests.fakes.fake_sendspin import FakeSendspinServer
@@ -178,3 +181,134 @@ async def test_yielding_is_reported_not_hidden(hass: HomeAssistant, wired) -> No
     assert coordinator.data.endpoints[URL].yielded_reason == "another_server"
 
     await host.async_close()
+
+
+# --- Controller links to Plum units ----------------------------------------
+#
+# Both cases below broke the same way when Plum-Audio moved to 9.1.x: a unit's
+# `server_id` used to be a unit-scoped value and is now its X25519 public key.
+# Anything that identified a unit by comparing those two stopped matching.
+
+PLUM_KEY = "UDtWfFDLwBRGSZtv38GsSB1Rh9Dnc7aWJN0b53m781w"
+
+
+def _stub_link(
+    server_id: str | None,
+    *,
+    name: str | None = "Plum Amp100",
+    connected: bool = True,
+    title: str | None = None,
+) -> MagicMock:
+    """A controller link reporting a given identity, without a socket."""
+    link = MagicMock()
+    link.snapshot = ControllerSnapshot(
+        server_name=name,
+        server_id=server_id,
+        connected=connected,
+        title=title,
+        playback_state="playing" if title else "stopped",
+    )
+    return link
+
+
+async def test_a_source_link_is_not_a_duplicate_of_a_server_link(
+    hass: HomeAssistant, wired
+) -> None:
+    """A link aimed at one source is not a redundant path to its unit.
+
+    Observed on hardware: the dedupe closed `unit-7204:airplay-1` every poll
+    because `server:[fd00:...]` reached the same `server_id`, the next sync
+    rebuilt it, and a speaker's now-playing alternated between the routed track
+    and nothing on a ten-second cycle — the rebuilt link reports no metadata
+    until the server sends it, and it takes precedence while it exists.
+
+    The two links share an identity but not a purpose: a `server:` link goes
+    wherever the server puts it, a source link is deliberately placed in one
+    group. Only `server:` links can be redundant with each other.
+    """
+    coordinator, *_ = wired
+    coordinator._links["server:[fd00:1::dea6:32ff:fe2f:8080]"] = _stub_link(PLUM_KEY)
+    coordinator._links["unit-7204:airplay-1"] = _stub_link(PLUM_KEY)
+
+    coordinator._async_drop_duplicate_links()
+    await hass.async_block_till_done()
+
+    assert "unit-7204:airplay-1" in coordinator._links
+    assert "server:[fd00:1::dea6:32ff:fe2f:8080]" in coordinator._links
+
+
+async def test_a_second_address_for_one_server_is_still_dropped(
+    hass: HomeAssistant, wired
+) -> None:
+    """The dedupe must still do its job for genuinely redundant server links."""
+    coordinator, *_ = wired
+    coordinator._links["server:192.168.7.204"] = _stub_link(PLUM_KEY)
+    coordinator._links["server:[fd00:1::dea6:32ff:fe2f:8080]"] = _stub_link(PLUM_KEY)
+
+    coordinator._async_drop_duplicate_links()
+    await hass.async_block_till_done()
+
+    assert list(coordinator._links) == ["server:192.168.7.204"]
+
+
+async def test_a_unit_reached_by_a_second_address_is_not_a_foreign_server(
+    hass: HomeAssistant, wired
+) -> None:
+    """A Plum unit is reachable by naming its streams, so it is not a destination.
+
+    It is discovered over IPv6 as well as IPv4, so the host comparison misses it
+    and identity has to catch it. Matching the link's `server_id` against the
+    unit's `unit_id` used to work and no longer does, which put a bare "Plum
+    Amp100" in the dropdown beside that unit's own "Plum Amp100 / 204 AP".
+    """
+    coordinator, *_ = wired
+    coordinator._mesh_view = parse_view(
+        {
+            "units": [
+                {
+                    "unit_id": "unit-7204",
+                    "name": "Plum Amp100",
+                    "host": "192.168.7.204",
+                    "server_id": PLUM_KEY,
+                    "sources": [
+                        {
+                            "source_id": "airplay-1",
+                            "name": "204 AP",
+                            "active": True,
+                            "group_id": "55e8f5b1",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    coordinator._links["server:[fd00:1::dea6:32ff:fe2f:8080]"] = _stub_link(PLUM_KEY)
+
+    assert coordinator._foreign_servers() == ()
+
+
+async def test_a_genuinely_foreign_server_is_still_offered(
+    hass: HomeAssistant, wired
+) -> None:
+    """Music Assistant publishes no mesh API, and is the case the feature exists for."""
+    coordinator, *_ = wired
+    coordinator._mesh_view = parse_view(
+        {
+            "units": [
+                {
+                    "unit_id": "unit-7204",
+                    "name": "Plum Amp100",
+                    "host": "192.168.7.204",
+                    "server_id": PLUM_KEY,
+                    "sources": [{"source_id": "airplay-1", "name": "204 AP"}],
+                }
+            ]
+        }
+    )
+    coordinator._links["server:192.168.7.226"] = _stub_link(
+        "B3iRNtk3Bn-qzDVrf2-BhutRtpPQYyuVSamLSf4qZT4", name="Music Assistant"
+    )
+
+    assert coordinator._foreign_servers() == (
+        ("B3iRNtk3Bn-qzDVrf2-BhutRtpPQYyuVSamLSf4qZT4", "Music Assistant"),
+    )

@@ -607,9 +607,21 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         hosts, and its identity is only known once a link connects — so the
         duplicate can only be spotted afterwards. Left open it is a wasted
         socket, and it makes one playing server look like two.
+
+        **Only `server:` links can be redundant with each other.** A source link
+        is keyed `<unit>:<source>` and shares its unit's `server_id`, so it
+        looked like a duplicate the moment Plum-Audio 9.1.x started reporting
+        one identity for both — and closing it every poll, only for the next
+        sync to rebuild it, made a routed speaker's now-playing alternate
+        between its track and nothing on a ten-second cycle. The two links share
+        an identity but not a purpose: a `server:` link goes wherever the server
+        puts it, while a source link is deliberately placed in one group and is
+        the only thing that can report that group's metadata.
         """
         seen: dict[str, str] = {}
         for key, link in list(self._links.items()):
+            if not key.startswith("server:"):
+                continue
             server_id = link.snapshot.server_id
             if server_id is None or not link.snapshot.connected:
                 continue
@@ -863,7 +875,10 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             snapshot = link.snapshot
             if not (snapshot.connected and snapshot.server_id and snapshot.server_name):
                 continue
-            if key.startswith("ctrl:"):
+            # Only `server:` links are candidates. A source link is keyed
+            # `<unit>:<source>`, is always aimed at a unit excluded below
+            # anyway, and never described a destination.
+            if not key.startswith("server:"):
                 continue
             if snapshot.server_id == self.host.server_id:
                 continue
@@ -871,8 +886,15 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 continue
             # A unit reached over a second address — an IPv6 ULA, say — carries
             # the same `server_id` as its mesh entry, so identity catches what
-            # the host comparison cannot.
-            if any(s.unit_id == snapshot.server_id for s in self._mesh_view.sources):
+            # the host comparison cannot. Compared against the unit's own
+            # `server_id` and not its `unit_id`: those were interchangeable
+            # until Plum-Audio 9.1.x started reporting an X25519 public key, at
+            # which point this matched nothing and every unit reachable over a
+            # second address reappeared in the dropdown as a bare server.
+            if any(
+                s.unit_server_id and s.unit_server_id == snapshot.server_id
+                for s in self._mesh_view.sources
+            ):
                 continue
             servers.setdefault(snapshot.server_id, snapshot.server_name)
         return tuple(sorted(servers.items(), key=lambda kv: kv[1].lower()))

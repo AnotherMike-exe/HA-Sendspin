@@ -59,6 +59,15 @@ class MeshSource:
     """A sender is really feeding this source. Note Plum holds this true for up
     to SOURCE_IDLE_TIMEOUT_S (default 300s) after a sender walks away."""
     streaming: bool = False
+    unit_server_id: str | None = None
+    """The Sendspin `server_id` of the unit publishing this source.
+
+    Not the same thing as `unit_id`, and the distinction is load-bearing. A unit
+    used to report a unit-scoped value in `server/hello`; since 9.1.x it reports
+    its X25519 public key, so identifying a unit by comparing a link's
+    `server_id` to `unit_id` silently stopped matching anything. This is the
+    value a controller link actually reports back.
+    """
     player_ids: tuple[str, ...] = ()
     source_volume: int | None = None
     source_muted: bool | None = None
@@ -224,6 +233,7 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                     source_id=source_id,
                     # Upstream already falls back to the id, but never trust it.
                     name=source.get("name") or source_id,
+                    unit_server_id=unit.get("server_id"),
                     group_id=source.get("group_id"),
                     active=_as_bool(source.get("active")),
                     streaming=_as_bool(source.get("streaming")),
