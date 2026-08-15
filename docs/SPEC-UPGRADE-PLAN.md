@@ -3,11 +3,17 @@
 What has to change in this integration as the Sendspin peers on the network
 move into the encrypted era, and — more of it than expected — what does not.
 
-**Status: first measured pass done, 2026-08-15.** Plum-Audio is on 9.1.x
+**Status: measured, and acted on. 2026-08-15.** Plum-Audio is on 9.1.x
 (`phase3-dev`), Music Assistant is on the beta, and MA and the Plum endpoints are
 paired to each other. The predictions written ahead of the upgrade were **partly
 wrong in an important way** — see §0. Sections below are corrected in place, with
 the superseded reasoning kept where it explains why the wrong answer looked right.
+
+The work this analysis called for is tracked in
+[ROUTING-RESTORATION-PLAN.md](ROUTING-RESTORATION-PLAN.md); its Track A shipped
+as v0.3.7–v0.3.9 and routing now works across the fleet. **Pairing was not
+needed for it** — see §5a, and note that §4b records the one identity change
+this document originally missed.
 
 Provenance is marked throughout, because the three grades are not
 interchangeable:
@@ -443,6 +449,44 @@ Pairing records are keyed by `client_id` (`noise/trust_store.py:314`), which is
 also why staging a PSK before a dial requires knowing the player's public key in
 advance.
 
+### 4b. A *server's* id changed shape too, and that is the one that bit
+
+The section above records `client_id` becoming a public key. 🔬 The same is true
+of `server_id`, and that turned out to be the more expensive half — it broke two
+things in ways no test caught, both found only by running against the fleet.
+
+A Plum unit used to report a unit-scoped `server_id` in `server/hello`, close
+enough to its `unit_id` that code identified a unit by comparing the two. Since
+9.1.x it reports its X25519 public key:
+
+| | Before | 🔬 Now |
+|---|---|---|
+| mesh `unit_id` | `unit-7204` | `unit-7204` (unchanged) |
+| `server/hello` `server_id` | unit-scoped | `UDtWfFDLwBRGSZtv38GsSB1Rh9Dnc7aWJN0b53m781w` |
+| mDNS instance name (MA) | friendly name | its public key |
+
+Two consequences, both shipped as bugs and both fixed in v0.3.8:
+
+1. **A unit stopped being recognisable as a unit.** `_foreign_servers` excludes
+   Plum units from the "hand this speaker to another server" list, first by
+   host and then — for a unit discovered over IPv6 as well as IPv4 — by
+   comparing the link's `server_id` to `unit_id`. That comparison now never
+   matches, so every unit reachable at a second address reappeared in the source
+   dropdown as a bare server beside its own streams. The mesh view **already
+   publishes** the unit's real `server_id`; `parse_view` simply never read it.
+2. **Two links to one unit became indistinguishable.** A source link is keyed
+   `<unit>:<source>` and a server link `server:<host>`, and they now report the
+   same identity — so the duplicate-link sweep closed the source link every
+   poll, the next sync rebuilt it, and a routed speaker's now-playing
+   alternated between its track and nothing on a ten-second cycle.
+
+**The lesson worth carrying into Track B and C**: this document tracked the
+identity change carefully for *players*, where it turned out to be harmless
+because the mesh view and the wire agreed. It did not think about *servers*,
+where the same change quietly invalidated every equality test between an id
+from the mesh and an id from the wire. Before touching pairing, grep for
+comparisons between the two — they are the shape of this defect.
+
 ### `CONCURRENT_ATTEMPT` is unhandled, and it is now the reason we actually get
 
 🔬 `_NON_RETRYABLE_GOODBYES` (`server_host.py:80-86`) lists `ANOTHER_SERVER`,
@@ -800,9 +844,13 @@ could not do on its own.
 - [ ] Confirm the `PLAYBACK` result on the other two ESPHome speakers. Only
       `esparagus-hifi-1` was tested for it; the other two were tested on
       `DISCOVERY` only, and there is no reason to expect a difference.
-- [ ] Confirm `ctrl:<unit>:<source>` targeting still places the controller link
-      in the right group. *Not done:* nothing was playing anywhere during the
-      pass, so there was no group to land in. Needs a live stream.
+- [x] Confirm `ctrl:<unit>:<source>` targeting still places the controller link
+      in the right group. **It does.** A link with a `ctrl:<source>:<nonce>` id
+      lands in the named source's group and receives title, artist and a 65 KB
+      artwork frame. Note the *ordering*, which cost a release: metadata arrives
+      **before** the placement moves complete and is never repeated, so a client
+      that treats a group change as a new context discards the only metadata it
+      will get (fixed in v0.3.9).
 - [ ] Turn MA's *Allow legacy clients* **off** and record exactly what is lost.
       *Not done:* deliberately — it is a destructive change to a working rig and
       wants a hand on MA's settings and a moment when nothing is playing.

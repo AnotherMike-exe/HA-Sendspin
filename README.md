@@ -9,9 +9,11 @@ network. If you want HA-native Sendspin routing today, the alternative is
 installing all of Music Assistant to get the Sendspin slice. This is that
 slice, on its own.
 
-> **Status: v0.3.x — working, and honest about its edges.** Discovery,
+> **Status: v0.3.9 — working, and honest about its edges.** Discovery,
 > adoption, stream selection, now-playing, cover art and transport all work
-> against real hardware. See [what doesn't work yet](#what-doesnt-work-yet).
+> against real hardware, including speakers running the encrypted Sendspin 9.1
+> era alongside cleartext ESPHome ones. See
+> [what doesn't work yet](#what-doesnt-work-yet).
 
 ---
 
@@ -37,10 +39,11 @@ slice, on its own.
 - 🔁 **Both directions.** Other Sendspin servers appear in the same dropdown as
   your streams, so a speaker can be handed to Music Assistant and taken back.
   Only servers you cannot already reach by naming a stream are listed.
-- 🤝 **It declines to fight.** If another Sendspin server takes a speaker back,
-  the integration stops dialling and tells you, rather than starting a
-  tug-of-war that degrades both. `sendspin.reclaim_player` overrides that when
-  you actually want the speaker.
+- 🤝 **It declines to fight.** Adopting a speaker takes it from whatever holds
+  it — that is what adoption is — but if another Sendspin server then takes it
+  back, the integration stops dialling and tells you rather than starting a
+  tug-of-war that degrades both. `sendspin.reclaim_player` asks again when you
+  actually want the speaker.
 
 ## What doesn't work yet
 
@@ -62,6 +65,12 @@ slice, on its own.
   protocol has no "give this speaker to that server" verb, so choosing another
   server stops Home Assistant holding the speaker and lets that server's own
   dialling take it.
+- **Home Assistant cannot take a speaker that a Sendspin 9.1+ server is
+  holding.** Such a speaker refuses a second server outright unless the newcomer
+  is paired with it, and pairing is not implemented yet. Routing, volume and
+  now-playing for those speakers all work — via their own unit — so this only
+  affects Home Assistant holding the connection itself. See
+  [the routing plan](docs/ROUTING-RESTORATION-PLAN.md).
 
 ## Requirements
 

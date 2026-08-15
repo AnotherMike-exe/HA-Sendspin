@@ -4,10 +4,48 @@ Getting back to Sendspin-6-equivalent routing and control across **every**
 endpoint class on the network — ESPHome speakers, Voice PE, Plum-Audio players
 and any third-party endpoint — preferring a route that needs no pairing.
 
-**Status: proposed, awaiting bulk approval.** Nothing here is implemented.
-Measurements are from the 2026-08-15 pass recorded in
-[SPEC-UPGRADE-PLAN.md](SPEC-UPGRADE-PLAN.md); this document is the *what to
-build* half and does not repeat the analysis.
+**Status: Track A shipped and verified on hardware, 2026-08-15 (v0.3.7 → v0.3.9).**
+Track B is still undecided and waits on the G1/G2 gate tests in §5. Measurements
+are from the pass recorded in [SPEC-UPGRADE-PLAN.md](SPEC-UPGRADE-PLAN.md); this
+document is the *what to build* half and does not repeat the analysis.
+
+### What shipped
+
+| Release | Change |
+|---|---|
+| **v0.3.7** | A1–A5: adoption dials `PLAYBACK`, `CONCURRENT_ATTEMPT` is non-retryable, reclaim re-dials through adoption, diagnostics gained a `clients` block, yielded clients are released |
+| **v0.3.8** | Two regressions the deploy exposed — see below |
+| **v0.3.9** | A pinned `ctrl:` link keeps the metadata it was placed with |
+
+🔬 **Verified live**: routing and source selection work for both Plum endpoints
+and ESPs; now-playing is stable and correct on a routed speaker; the source
+dropdown lists only real streams.
+
+### Three faults the deploy found that the plan did not predict
+
+All three were invisible to the test suite and only appeared against hardware.
+Worth recording, because two of them share the cause the upgrade analysis
+already identified and one is a lesson about the fake.
+
+1. **`remove_client` is a coroutine** and was called without being awaited, so
+   A5 did nothing but log a `RuntimeWarning`. The tests passed because the
+   *fake* made it synchronous — a fake whose whole purpose is to reproduce
+   upstream's defects diverged from upstream's **signature** and hid one
+   instead. The fake is async now, which fails the old code.
+2. **Now-playing flapped** between the routed track and nothing every ten
+   seconds. A source link is keyed `<unit>:<source>` and shares its unit's
+   `server_id`, so the duplicate-link sweep closed it as a second path to a
+   server already reached; the next sync rebuilt it, and a rebuilt link reports
+   no metadata while still taking precedence.
+3. **The dropdown listed bare "Plum Amp100" and "Plum RackPi"** beside those
+   units' own streams, because the identity fallback that excludes a unit
+   discovered over two addresses compared `unit_id` against `server_id`.
+
+(2) and (3) are the **same root cause the upgrade analysis names**: a unit's
+`server_id` is now its X25519 public key rather than a unit-scoped value. §4 of
+the upgrade plan recorded that shape change for `client_id` and for player
+identity, and missed that the *server* side of it silently broke every place a
+unit was recognised by comparing the two. See SPEC-UPGRADE-PLAN §4b.
 
 ---
 
@@ -279,29 +317,29 @@ being skipped for a cleartext peer, and a staged PSK surviving a restart.
 
 ## 8. Sequencing and approval
 
-| Order | Item | Depends on | Approval |
+| Order | Item | Depends on | State |
 |---|---|---|---|
-| 1 | G3 gate test | — | read-only, no approval needed |
-| 2 | **Track A** (A1–A5) + unit tests §6.1 | — | **amends Critical Rule 5** |
-| 3 | G1 + G2 gate tests | MA player settings | needs a quiet window |
-| 4 | Live tests §6.2 | Track A merged | **restarts live HA** |
-| 5 | Track B decision | G1, G2 | your call between B0/B1/B2/B3 |
-| 6 | Track C, only if B3 | step 5 | scope already agreed |
+| 1 | G3 gate test | — | ✅ passed |
+| 2 | **Track A** (A1–A5) + unit tests §6.1 | — | ✅ shipped v0.3.7 |
+| 3 | Live tests §6.2 | Track A merged | ◐ partly — see below |
+| 4 | G1 + G2 gate tests | MA player settings | ☐ **next**, needs a quiet window |
+| 5 | Track B decision | G1, G2 | ☐ your call between B0/B1/B2/B3 |
+| 6 | Track C, only if B3 | step 5 | ☐ scope already agreed |
 
-### What approving this authorises
+### Live tests, as actually run
 
-- Editing `server_host.py`, `diagnostics.py` and `tests/`
-- Adding `tests/test_server_host.py`
-- Rewriting Critical Rule 5's premise in `CLAUDE.md` — its conclusion stands,
-  its stated mechanism is 🔬 false
-- Running read-only probes against the fleet at will
+| # | Test | Result |
+|---|---|---|
+| L1 | Adopt an ESPHome speaker through the integration | ✅ routing and control confirmed by hand |
+| L3 | `select_source` onto a Plum stream | ✅ works for ESPs and Plum endpoints |
+| L6 | Adopt a Plum player | ✅ yields cleanly naming `concurrent_attempt`, first refusal, no flapping |
+| L7 | Now-playing from a Plum unit with something playing | ✅ after v0.3.9 — stable title, artist and artwork |
+| L2, L4, L5, L8, L9 | volume/mute, `Source: None`, server hand-off, restart persistence, mixed encrypted + cleartext | ☐ not yet exercised deliberately |
 
-### What it does not authorise, and will be asked for separately
-
-- `ha_probe.sh cycle` / `restart` / `update` — restarts your live instance
-- Touching MA's player settings for G1/G2
-- Any Track C code, which waits on the step-5 decision
-- Any commit or release tag
+L7 also closes the outstanding `ctrl:<unit>:<source>` item in
+SPEC-UPGRADE-PLAN §8: targeting **works** on 9.1.x. A link with a
+`ctrl:<source>:<nonce>` id lands in the named source's group and receives
+title, artist and artwork.
 
 ### Rollback
 
