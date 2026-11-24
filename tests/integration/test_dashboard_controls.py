@@ -171,3 +171,70 @@ async def test_mute_on_a_speaker_we_hold_goes_over_our_own_connection(
 
     post.assert_not_awaited()
     assert fake_server.clients_by_id[CLIENT_ID].player.commanded_mutes == [True]
+
+
+# --- Volume step --------------------------------------------------------------
+
+
+async def test_volume_step_is_offered_with_the_slider(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A speaker with a known level can be stepped."""
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    features = hass.states.get(entity_id(hass)).attributes["supported_features"]
+
+    assert features & MediaPlayerEntityFeature.VOLUME_SET
+    assert features & MediaPlayerEntityFeature.VOLUME_STEP
+
+
+async def test_volume_step_is_absent_when_the_level_is_unknown(
+    hass: HomeAssistant,
+) -> None:
+    """A step from an unknown level has no start point, so it is not offered."""
+    server = FakeSendspinServer()
+    server.attach(PLAYER_URL, CLIENT_ID, "Satellite1")
+    await setup_with_mesh(hass, server, FIXTURE)
+
+    features = hass.states.get(entity_id(hass)).attributes["supported_features"]
+
+    assert not features & MediaPlayerEntityFeature.VOLUME_STEP
+
+
+async def test_volume_up_and_down_move_the_endpoint_by_one_step(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Five points for each press, in whole percent."""
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+    role = fake_server.clients_by_id[CLIENT_ID].player
+
+    await call(hass, "volume_up", FIXTURE)
+    await call(hass, "volume_down", FIXTURE)
+
+    # The fake does not echo a command, so each press starts from 40.
+    assert role.commanded_volumes == [45, 35]
+
+
+async def test_volume_step_stops_at_the_ends(hass: HomeAssistant) -> None:
+    """A press at the limit sends the limit, never a value out of range."""
+    server = FakeSendspinServer()
+    server.attach(PLAYER_URL, CLIENT_ID, "Satellite1", volume=98, muted=False)
+    await setup_with_mesh(hass, server, FIXTURE)
+
+    await call(hass, "volume_up", FIXTURE)
+
+    assert server.clients_by_id[CLIENT_ID].player.commanded_volumes == [100]
+
+
+async def test_volume_step_through_a_unit_keeps_the_mute(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A step is a volume command, so it follows the same pair rule."""
+    payload = held_by_unit(volume=35, muted=True)
+    await hand_to_unit(hass, fake_server, payload)
+
+    post = await call(hass, "volume_up", payload)
+
+    post.assert_awaited_once_with(
+        UNIT_HOST, "volume", {"player_id": CLIENT_ID, "volume": 40, "muted": True}
+    )

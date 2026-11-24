@@ -35,6 +35,9 @@ from .entity import SendspinEndpointEntity
 from .mesh import MeshError
 from .server_host import player_role
 
+# One press of volume up or down, in percent of the endpoint level.
+VOLUME_STEP_PERCENT = 5
+
 # Sendspin command name -> the Home Assistant feature it satisfies.
 _TRANSPORT_FEATURES = {
     "play": MediaPlayerEntityFeature.PLAY,
@@ -85,6 +88,7 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
     _attr_name = None  # the device name is the entity name
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
+    _attr_volume_step = VOLUME_STEP_PERCENT / 100
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
@@ -106,7 +110,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         # to a unit must not cost the user their volume control.
         if endpoint.connected or endpoint.held_by_unit_host is not None:
             if endpoint.volume is not None:
-                features |= MediaPlayerEntityFeature.VOLUME_SET
+                features |= (
+                    MediaPlayerEntityFeature.VOLUME_SET
+                    | MediaPlayerEntityFeature.VOLUME_STEP
+                )
             if endpoint.muted is not None:
                 features |= MediaPlayerEntityFeature.VOLUME_MUTE
 
@@ -428,6 +435,11 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     def volume_level(self) -> float | None:
         """0.0-1.0, or None when the speaker has never reported a level.
 
+        This is the **endpoint** level: the gain of this one speaker. It is not
+        the group level of the stream, and it is not the source level on the
+        sending device. Those are separate volumes in Plum-Audio, and this
+        entity reads and writes neither of them.
+
         None must stay None. Substituting a default makes every speaker read
         100% while the audio is demonstrably quieter, which looks exactly like
         a UI bug and is not one.
@@ -467,6 +479,29 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     async def async_set_volume_level(self, volume: float) -> None:
         """Command the speaker's volume, through whoever is holding it."""
         await self._async_command_volume(volume=round(volume * 100))
+
+    async def async_volume_up(self) -> None:
+        """Raise the speaker's volume by one step."""
+        await self._async_step_volume(VOLUME_STEP_PERCENT)
+
+    async def async_volume_down(self) -> None:
+        """Lower the speaker's volume by one step."""
+        await self._async_step_volume(-VOLUME_STEP_PERCENT)
+
+    async def _async_step_volume(self, delta: int) -> None:
+        """Move the endpoint level by `delta` percent, held inside 0-100.
+
+        Whole percent, because that is the unit of the protocol. A float step
+        on `volume_level` drifts, and two presses do not always undo each other.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.volume is None:
+            raise HomeAssistantError(
+                "The volume of this speaker is not known, so it cannot be stepped"
+            )
+        await self._async_command_volume(
+            volume=max(0, min(100, endpoint.volume + delta))
+        )
 
     async def async_mute_volume(self, mute: bool) -> None:
         """Command the speaker's mute state, through whoever is holding it."""
