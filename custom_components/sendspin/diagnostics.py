@@ -63,6 +63,8 @@ async def async_get_config_entry_diagnostics(
                 "media_title": snapshot.media_title,
                 "media_artist": snapshot.media_artist,
                 "media_playing": snapshot.media_playing,
+                # The transport state the entity state is derived from.
+                "media_state": snapshot.media_state,
                 "media_link": snapshot.media_link,
             }
             for snapshot in data.endpoints.values()

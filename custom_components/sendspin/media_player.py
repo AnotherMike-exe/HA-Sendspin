@@ -311,65 +311,74 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     def state(self) -> MediaPlayerState | None:
         """What this speaker is doing, as far as anything can tell us.
 
+        | State | When |
+        |---|---|
+        | playing | the stream it is on plays |
+        | paused | the stream it is on is paused |
+        | idle | it is on no stream, or the stream stopped |
+        | unavailable | nothing can see the speaker (see `available`) |
+
         Home Assistant originates no audio, so a speaker we hold is idle by
         definition. But a speaker sitting on someone else's stream may well be
         playing, and the mesh tells us whether audio is flowing on it — so say
         so rather than reporting idle over the top of music.
+
+        The state comes from the transport state of the stream, never from the
+        title. A server keeps the last title after a stream stops, and reading
+        the title held this at paused for as long as the link stayed open.
         """
         endpoint = self.endpoint
         if endpoint is None:
             return None
-        if endpoint.media_title is not None:
-            # Home Assistant only surfaces media attributes for a player that
-            # is playing or paused, so a speaker with an observed track must
-            # say so or its title, artist and cover art never reach the UI.
-            return (
-                MediaPlayerState.PLAYING
-                if endpoint.media_playing
-                else MediaPlayerState.PAUSED
-            )
-        if endpoint.source_label is not None:
-            return (
-                MediaPlayerState.PLAYING
-                if endpoint.source_streaming
-                else MediaPlayerState.PAUSED
-                if endpoint.media_title is not None
-                else MediaPlayerState.IDLE
-            )
-        if (
-            endpoint.connected
-            or endpoint.yielded_reason is not None
-            or endpoint.known_to_mesh
-        ):
-            # Present, just not on a stream — or on another server entirely.
+        if self.source in (None, SOURCE_NONE) and endpoint.media_link is None:
             return MediaPlayerState.IDLE
-        return MediaPlayerState.OFF
+        if endpoint.media_state == "paused":
+            # The link is pushed and the mesh is polled, so the link knows of a
+            # pause first. Do not let a stale `streaming` flag play over it.
+            return MediaPlayerState.PAUSED
+        if endpoint.media_state == "playing" or (
+            endpoint.source_label is not None and endpoint.source_streaming
+        ):
+            # The mesh half matters when no link reads the stream, and when a
+            # link reads `stopped` because it was not placed in the group.
+            return MediaPlayerState.PLAYING
+        return MediaPlayerState.IDLE
+
+    @property
+    def _shows_media(self) -> bool:
+        """Whether there is a current track to show.
+
+        False when the stream ended or the source is None. Each media property
+        reads this, so the title, the artist, the album and the cover all go at
+        the same moment and a card does not keep a track that is over.
+        """
+        return self.state in (MediaPlayerState.PLAYING, MediaPlayerState.PAUSED)
 
     @property
     def media_title(self) -> str | None:
         """What is playing on this speaker's stream."""
-        return self.endpoint.media_title if self.endpoint else None
+        return self.endpoint.media_title if self._shows_media else None
 
     @property
     def media_artist(self) -> str | None:
         """Artist of the current track."""
-        return self.endpoint.media_artist if self.endpoint else None
+        return self.endpoint.media_artist if self._shows_media else None
 
     @property
     def media_album_name(self) -> str | None:
         """Album of the current track."""
-        return self.endpoint.media_album if self.endpoint else None
+        return self.endpoint.media_album if self._shows_media else None
 
     @property
     def media_content_type(self) -> MediaType | None:
         """Sendspin carries audio and says nothing finer."""
-        return MediaType.MUSIC if self.endpoint and self.endpoint.media_title else None
+        return MediaType.MUSIC if self._shows_media else None
 
     @property
     def media_duration(self) -> int | None:
         """Track length in seconds, or None for a live stream."""
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_duration is None:
+        if not self._shows_media or endpoint.media_duration is None:
             return None
         return int(endpoint.media_duration)
 
@@ -385,7 +394,7 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         None when the sender reports no progress, as some AirPlay senders do.
         """
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_position is None:
+        if not self._shows_media or endpoint.media_position is None:
             return None
         return int(endpoint.media_position)
 
@@ -397,7 +406,7 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         """
         endpoint = self.endpoint
         if (
-            endpoint is None
+            not self._shows_media
             or endpoint.media_position is None
             or endpoint.media_position_updated_at is None
         ):
@@ -417,7 +426,13 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         return hashlib.sha256(artwork).hexdigest()[:16] if artwork else None
 
     def _artwork(self) -> bytes | None:
-        """Raw cover art from the link observing this speaker's stream."""
+        """Raw cover art from the link observing this speaker's stream.
+
+        None when there is no current track. A link keeps the last cover until
+        the server sends an empty frame, which a stream that ends does not do.
+        """
+        if not self._shows_media:
+            return None
         link = self.coordinator.link_for(
             self.endpoint.media_link if self.endpoint else None
         )

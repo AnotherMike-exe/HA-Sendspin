@@ -91,6 +91,12 @@ class EndpointSnapshot:
     media_position_updated_at: float | None = None
     media_duration: float | None = None
     media_playing: bool = False
+    media_state: str | None = None
+    """`playing`, `paused` or `stopped`, as the link that reads the stream
+    reports it. None when no link reads it, or the link reports no state.
+
+    Kept apart from the title on purpose. A server keeps the last title after a
+    stream stops, so a title says nothing about what the stream does now."""
     media_commands: tuple[str, ...] = ()
     media_repeat: str | None = None
     """`off`, `one` or `all`, when the stream reports a repeat mode."""

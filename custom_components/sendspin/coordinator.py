@@ -41,7 +41,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DEFAULT_SERVER_PORT as SENDSPIN_SERVER_PORT
 from .const import DEFAULT_WEBSOCKET_PATH, DOMAIN
-from .legacy_client import LegacyControllerClient
+from .legacy_client import ControllerSnapshot, LegacyControllerClient
 from .mesh import MESH_POLL_INTERVAL_S, MeshClient, MeshView
 from .models import EndpointSnapshot, SendspinData
 from .server_host import ServerHost, player_role
@@ -91,6 +91,27 @@ _INTERESTING_EVENTS = (
     ClientRemovedEvent,
     ClientUpdatedEvent,
 )
+
+
+def _transport_state(media: ControllerSnapshot | None) -> str | None:
+    """What a stream does now: `playing`, `paused`, `stopped` or unknown.
+
+    `group/update` carries the authoritative transport state, and the speed in
+    the progress refines it. Plum-Audio keeps a paused group at `playing` and
+    sets the speed to zero, so `playing` with a zero speed is a pause.
+
+    A stale progress never makes a stopped stream play: the last speed a server
+    sent stays in the snapshot after the stream ends.
+    """
+    if media is None:
+        return None
+    progress = media.progress
+    if media.playback_state == "playing":
+        return "paused" if progress is not None and not progress.playing else "playing"
+    if media.playback_state is not None:
+        return media.playback_state
+    # No group state yet. A running speed is the one thing that says anything.
+    return "playing" if progress is not None and progress.playing else None
 
 
 class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
@@ -711,7 +732,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 return key
         return None
 
-    def _media_for(self, source_key: str | None):
+    def _media_for(self, source_key: str | None) -> ControllerSnapshot | None:
         """The now-playing observed on a source, if we are observing it."""
         link = self._links.get(source_key) if source_key else None
         if link is None or not link.snapshot.connected:
@@ -841,13 +862,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 media_duration=media.progress.duration_s
                 if media and media.progress
                 else None,
-                media_playing=bool(
-                    media
-                    and (
-                        media.playback_state == "playing"
-                        or (media.progress is not None and media.progress.playing)
-                    )
-                ),
+                media_playing=_transport_state(media) == "playing",
+                media_state=_transport_state(media),
                 media_commands=media.supported_commands if media else (),
                 media_repeat=media.repeat if media else None,
                 media_shuffle=media.shuffle if media else None,

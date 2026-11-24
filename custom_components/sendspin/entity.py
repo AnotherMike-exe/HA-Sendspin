@@ -67,4 +67,8 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
             # Plum stream, and back. Marking it unavailable would take away the
             # one control that works on it.
             or endpoint.known_to_mesh
+            # Or a server we read from plays to it. A speaker handed to a
+            # server before a restart never yielded to us in this run, and is
+            # in no mesh view, so this is the one thing that says it is there.
+            or endpoint.held_by_server is not None
         )
