@@ -4,12 +4,17 @@ One durable entity per **physical endpoint** — a speaker — not one per strea
 Streams come and go constantly; anchoring entities to them would churn the
 entity registry and discard the user's renames, areas and icons on every
 reconnect. Instead the stream an endpoint is assigned to becomes state *on* the
-endpoint, and in M4 the available streams become its `source_list`.
+endpoint, and the streams that are live become its `source_list`.
 
-M2 scope: adoption, presence, volume and mute. There is no transport, no
-metadata and no source list yet, because Home Assistant originates no audio and
-nothing is reading a stream. `supported_features` reflects that honestly rather
-than offering controls that cannot be honoured.
+The source dropdown is the one routing control. To select a source puts the
+speaker on that stream, and that is grouping: no `GROUPING` feature, no
+`group_members`, no join. `None` is a true none.
+
+`supported_features` is read from the endpoint and its current stream on each
+state write, so the entity offers only the controls that work now. The volume
+is the endpoint level, never the group level or the source level.
+
+docs/DASHBOARD.md has the feature table for each kind of source.
 """
 
 from __future__ import annotations

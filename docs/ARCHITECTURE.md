@@ -2,10 +2,11 @@
 
 Living document. Update as the codebase evolves.
 
-**Status**: discovery, adoption, source selection, now-playing, cover art and
-transport are implemented and verified against real hardware. Per-speaker volume
-for a speaker another server holds is not — see
-[OPEN-QUESTIONS §8](OPEN-QUESTIONS.md).
+**Status**: discovery, adoption, source selection, now-playing, cover art,
+transport and volume are implemented. Volume for a speaker another server holds
+is not offered, by decision: see [OPEN-QUESTIONS §8](OPEN-QUESTIONS.md). The
+dashboard controls of 2026-11-24 (§9) have unit and integration tests, and no
+test on a live Home Assistant yet.
 
 ---
 
@@ -21,8 +22,8 @@ HA-Sendspin/
 │       ├── config_flow.py     # User + zeroconf discovery flows
 │       ├── coordinator.py     # Controller websocket → entity state (push)
 │       ├── discovery.py       # Parses mDNS records handed over by HA core
-│       ├── media_player.py    # One entity per active stream/group
-│       ├── services.yaml      # Group add/remove, roam
+│       ├── media_player.py    # One entity per adopted speaker (endpoint)
+│       ├── services.yaml      # Adoption lifecycle: adopt, release, reclaim
 │       ├── icons.json         # Service icons (HA 2024.2+ location)
 │       ├── strings.json       # Source strings
 │       ├── translations/      # en.json (literal strings — no [%key%] refs)
@@ -86,7 +87,7 @@ and routing exist solely as in-process Python on a `SendspinServer`.
 
 ## 3. Core Components
 
-### 3.1. Discovery (`discovery.py`) — *planned*
+### 3.1. Discovery (`discovery.py`)
 
 **Responsibility**: turn zeroconf records into `SendspinDiscovery` values.
 
@@ -98,7 +99,7 @@ Plum-Audio's `backend/scripts/mesh/avahi.py` is a working reference for the
 D-Bus plumbing and the TXT record shape — **reference, not code to copy**: it
 also advertises, which this project does not need.
 
-### 3.2. Config flow (`config_flow.py`) — *planned*
+### 3.2. Config flow (`config_flow.py`)
 
 Two paths: manual listener-URL entry, and a zeroconf-triggered discovery flow
 (the same first-class pattern Sonos and Cast use).
@@ -142,7 +143,9 @@ source, so the list is filtered on `active or streaming` — an AirPlay endpoint
 with no sender is not somewhere a speaker can usefully be put. `None` is always
 offered, and whatever is currently selected is pinned even once it stops being
 live, so a stream ending under a routed speaker cannot leave the entity
-reporting a value absent from its own options. See
+reporting a value absent from its own options. An internal `cal:` calibration
+source is never listed and never named. A speaker that a Plum unit holds on no
+stream reports `None`, not the unit name. See
 [OPEN-QUESTIONS §7](OPEN-QUESTIONS.md#7-hardware-findings--m1-gate-2026-08-11),
 which records the measurement that reversed the original decision to list
 everything.
@@ -151,6 +154,24 @@ Which source a speaker is on comes from matching its `group_id` against each
 source's, because `player_ids` is empty on every unit of a real mesh. That match
 is also the only way a routing change made elsewhere — Music Assistant, the Plum
 GUI — becomes visible here.
+
+**What the entity offers** follows the stream, and is read again on each state
+write:
+
+- **Transport** comes from the commands the stream advertises: play, pause,
+  next, previous, stop, repeat and shuffle. A speaker on no stream has none.
+  There is no seek, because the protocol has none.
+- **State** comes from the transport state of the stream, never from the title:
+  `playing`, `paused`, `idle` (no stream, or the stream stopped) and
+  `unavailable` (nothing can see the speaker). Track, cover and position show
+  only while playing or paused.
+- **Volume** is the endpoint level. A command for a speaker that a Plum unit
+  holds goes through that unit, with `volume` and `muted` always sent together.
+- **Position** carries the server timestamp of the position, moved onto our
+  clock with the offset from `client/time`, so a link that joins mid-track is
+  right. A sender that reports no progress gives no position.
+
+[DASHBOARD.md](DASHBOARD.md) has the feature table for each kind of source.
 
 ### 3.5. Controller links (`legacy_client.py`)
 
@@ -277,8 +298,10 @@ repo layout; pytest runs the test suite.
 
 ## 9. Future Considerations / Roadmap
 
-- Resolve the arbitration and identity blockers in
-  [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md) before building routing.
+- Decide [OPEN-QUESTIONS §10](OPEN-QUESTIONS.md): whether another Sendspin
+  server stays in the source dropdown.
+- Pairing with a Sendspin 9.1+ speaker is not built. Custody stays with the
+  mesh API (OPEN-QUESTIONS §9).
 - Possible companion add-on **only if** discovery proves to need host networking
   that a plain integration cannot obtain.
 - Track Sendspin spec drift independently — there is no upstream to inherit
