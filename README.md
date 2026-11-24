@@ -9,7 +9,7 @@ network. If you want HA-native Sendspin routing today, the alternative is
 installing all of Music Assistant to get the Sendspin slice. This is that
 slice, on its own.
 
-> **Status: v0.3.9 — working, and honest about its edges.** Discovery,
+> **Status: v0.4.0 — working, and honest about its edges.** Discovery,
 > adoption, stream selection, now-playing, cover art and transport all work
 > against real hardware, including speakers running the encrypted Sendspin 9.1
 > era alongside cleartext ESPHome ones. See
