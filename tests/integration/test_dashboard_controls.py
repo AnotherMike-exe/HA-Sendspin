@@ -17,7 +17,7 @@ from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.sendspin.const import SOURCE_NONE
-from custom_components.sendspin.legacy_client import ControllerSnapshot
+from custom_components.sendspin.legacy_client import ControllerSnapshot, Progress
 from custom_components.sendspin.mesh import parse_view
 from tests.fakes.fake_sendspin import FakeSendspinServer
 from tests.integration.test_source_selection import (
@@ -521,3 +521,53 @@ async def test_a_command_the_stream_does_not_have_fails_clearly(
         await player.async_media_next_track()
 
     sent.assert_not_awaited()
+
+
+# --- Timeline -----------------------------------------------------------------
+
+
+async def test_the_position_carries_the_time_it_was_true(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Home Assistant extrapolates from `media_position_updated_at`."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+    taken_at = 1_800_000_000.0
+
+    await observe_stream(
+        hass,
+        entry,
+        playback_state="playing",
+        title="Easy Way Out",
+        progress=Progress(
+            position_s=10.0, duration_s=240.0, playing=True, updated_at=taken_at
+        ),
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["media_position"] == 10
+    assert state.attributes["media_duration"] == 240
+    assert state.attributes["media_position_updated_at"].timestamp() == taken_at
+    assert not features(hass) & MediaPlayerEntityFeature.SEEK
+
+
+async def test_a_sender_with_no_progress_shows_no_position(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Not a bar at zero. No bar."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(
+        hass,
+        entry,
+        playback_state="playing",
+        title="Easy Way Out",
+        progress=Progress(
+            position_s=None, duration_s=None, playing=True, updated_at=1.0
+        ),
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.state == "playing"
+    assert "media_position" not in state.attributes
+    assert "media_duration" not in state.attributes
+    assert "media_position_updated_at" not in state.attributes

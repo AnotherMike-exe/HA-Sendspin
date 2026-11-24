@@ -380,6 +380,9 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         Reported rather than extrapolated: position is never pushed
         periodically, and Home Assistant already advances it from the timestamp
         while the entity is playing.
+
+        Read-only. The protocol has no seek command, so `SEEK` is never offered.
+        None when the sender reports no progress, as some AirPlay senders do.
         """
         endpoint = self.endpoint
         if endpoint is None or endpoint.media_position is None:
@@ -388,9 +391,16 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
     @property
     def media_position_updated_at(self) -> datetime | None:
-        """When the position was last reported."""
+        """When the position was true, on the server's clock moved to ours.
+
+        None with no position. A time with nothing to extrapolate from is noise.
+        """
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_position_updated_at is None:
+        if (
+            endpoint is None
+            or endpoint.media_position is None
+            or endpoint.media_position_updated_at is None
+        ):
             return None
         return dt_util.utc_from_timestamp(endpoint.media_position_updated_at)
 

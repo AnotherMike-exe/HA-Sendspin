@@ -27,6 +27,7 @@ what is playing, plus transport commands for the group it is in.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 import logging
@@ -53,6 +54,14 @@ _BACKOFF_MAX_S = 60.0
 # never sends `client/time` as not operational.
 _TIME_SYNC_INTERVAL_S = 30.0
 
+# The clock is the sample with the shortest round trip out of this many. A slow
+# reply carries the most error, because the two directions are assumed equal.
+_CLOCK_WINDOW = 8
+
+# A progress timestamp older than this is not on the clock we synced to. Stamp
+# such a position with the receipt time.
+_MAX_PROGRESS_AGE_US = 24 * 60 * 60 * 1_000_000
+
 # Some servers place a controller into the group that is playing; Music
 # Assistant does not, leaving it in a solo group that reports nothing. `switch`
 # cycles a controller through the server's *playing* groups, which is the only
@@ -70,12 +79,23 @@ _SWITCH_REST_S = 30.0
 class Progress:
     """Where a track is, as of `updated_at`."""
 
-    position_s: float
+    position_s: float | None
+    """None when the sender reports no position. Some AirPlay senders send no
+    progress at all, and the unit then sends zero for position and duration.
+    That is unknown, not the start of a track."""
     duration_s: float | None
     playing: bool
     updated_at: float
-    """`time.time()` when this was received. Home Assistant extrapolates from
-    here, which avoids needing the server's clock just to draw a progress bar."""
+    """Wall-clock time, as `time.time()`, at which `position_s` was true.
+
+    Home Assistant extrapolates from here. This is the server `timestamp` of
+    the position, moved onto our clock, and not the time the message arrived:
+    a server sends a position once, so a link that joins mid-track receives a
+    position that is already old. The receipt time is the fallback when there
+    is no timestamp or no clock yet."""
+    server_timestamp_us: int | None = None
+    """The server's own stamp, kept so the position can be stamped again when
+    the first clock sample arrives after it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,8 +161,12 @@ class LegacyControllerClient:
         self._closing = False
         self._snapshot = ControllerSnapshot()
         self._switches = 0
-        # Server clock minus ours, in microseconds.
-        self._clock_offset_us = 0
+        # Server clock minus ours, in microseconds. None until the first
+        # `server/time`, and again after each reconnect.
+        self._clock_offset_us: int | None = None
+        self._clock_samples: deque[tuple[int, int]] = deque(maxlen=_CLOCK_WINDOW)
+        # Whether the current progress was stamped with a synced clock.
+        self._progress_synced = False
 
     @property
     def snapshot(self) -> ControllerSnapshot:
@@ -221,6 +245,7 @@ class LegacyControllerClient:
         """Handshake, then read until the socket closes."""
         async with self._session.ws_connect(self._url, heartbeat=30) as ws:
             self._ws = ws
+            self._reset_clock()
             await ws.send_json(self._hello())
 
             # Nothing may go on the wire between client/hello and server/hello.
@@ -409,13 +434,21 @@ class LegacyControllerClient:
                 progress = None
             else:
                 duration_ms = raw.get("track_duration") or 0
+                position_ms = raw.get("track_progress") or 0
+                timestamp_us = _as_int(metadata.get("timestamp"))
                 progress = Progress(
-                    position_s=(raw.get("track_progress") or 0) / 1000,
+                    # Zero position with zero duration is a sender that reports
+                    # no progress. A live stream has a position that moves.
+                    position_s=(
+                        position_ms / 1000 if duration_ms or position_ms else None
+                    ),
                     # 0 means live or unknown, not "zero length".
                     duration_s=(duration_ms / 1000) if duration_ms else None,
                     playing=bool(raw.get("playback_speed")),
-                    updated_at=time.time(),
+                    updated_at=self._wall_time_of(timestamp_us),
+                    server_timestamp_us=timestamp_us,
                 )
+                self._progress_synced = self._clock_offset_us is not None
 
         return replace(
             snapshot,
@@ -493,7 +526,13 @@ class LegacyControllerClient:
             await asyncio.sleep(_TIME_SYNC_INTERVAL_S)
 
     def _on_server_time(self, payload: dict[str, Any]) -> None:
-        """Estimate the server's clock with a simple round-trip midpoint."""
+        """Estimate the server's clock from a round trip.
+
+        The classic NTP minimum filter: each sample gives an offset and a
+        round-trip delay, and the sample with the shortest delay in the window
+        wins. Progress timestamps ride the server's monotonic clock, so this
+        offset is what puts a position on our own clock.
+        """
         try:
             sent = int(payload["client_transmitted"])
             received = int(payload["server_received"])
@@ -501,12 +540,64 @@ class LegacyControllerClient:
         except KeyError, TypeError, ValueError:
             return
         now = _now_us()
-        self._clock_offset_us = ((received - sent) + (replied - now)) // 2
+        delay = (now - sent) - (replied - received)
+        offset = ((received - sent) + (replied - now)) // 2
+        self._clock_samples.append((delay, offset))
+        self._clock_offset_us = min(self._clock_samples)[1]
+
+        # The server pushes state on join, before the first reply here. Stamp
+        # that position again now that there is a clock. Only that one: a
+        # position stamped with a clock stays, or each sample would write the
+        # state of each speaker on the stream.
+        progress = self._snapshot.progress
+        if (
+            progress is not None
+            and not self._progress_synced
+            and progress.server_timestamp_us is not None
+        ):
+            self._progress_synced = True
+            self._publish(
+                replace(
+                    self._snapshot,
+                    progress=replace(
+                        progress,
+                        updated_at=self._wall_time_of(progress.server_timestamp_us),
+                    ),
+                )
+            )
+
+    def _reset_clock(self) -> None:
+        """Forget the clock. A server that restarted has a new one."""
+        self._clock_samples.clear()
+        self._clock_offset_us = None
+        self._progress_synced = False
+
+    def _wall_time_of(self, server_timestamp_us: int | None) -> float:
+        """When a server timestamp happened, as `time.time()` on our clock.
+
+        Falls back to now, the receipt time, when there is no timestamp, no
+        clock yet, or a timestamp that cannot be on the clock we synced to.
+        """
+        now = time.time()
+        if server_timestamp_us is None or self._clock_offset_us is None:
+            return now
+        age_us = _now_us() + self._clock_offset_us - server_timestamp_us
+        if not 0 <= age_us <= _MAX_PROGRESS_AGE_US:
+            return now
+        return now - age_us / 1_000_000
 
     def _publish(self, snapshot: ControllerSnapshot) -> None:
         if snapshot != self._snapshot:
             self._snapshot = snapshot
             self._on_update(snapshot)
+
+
+def _as_int(value: Any) -> int | None:
+    """A wire integer, or None for anything that is not one."""
+    try:
+        return int(value)
+    except TypeError, ValueError:
+        return None
 
 
 def _now_us() -> int:
