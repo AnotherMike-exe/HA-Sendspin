@@ -28,6 +28,9 @@ class SendspinEndpointEntity(CoordinatorEntity[SendspinCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, frozen_url)},
             name=coordinator.memo.display_name(frozen_url),
+            # From the speaker's handshake, when it sent any. Absent otherwise:
+            # nothing here is guessed from a name or an address.
+            **coordinator.memo.device_details(frozen_url),
         )
 
     @property

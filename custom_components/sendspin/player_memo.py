@@ -42,12 +42,19 @@ STORAGE_VERSION = 1
 MEMO_STORAGE_KEY = f"{DOMAIN}.players"
 
 _KEY_HANDSHAKE_NAME = "handshake_name"
+_KEY_MESH_NAME = "mesh_name"
 _KEY_INSTANCE_NAME = "mdns_instance_name"
 _KEY_TXT_NAME = "mdns_txt_name"
 _KEY_CLIENT_ID = "client_id"
 _KEY_DIAL_URL = "dial_url"
 _KEY_ROUTED_AWAY = "routed_away"
 _KEY_HANDED_TO_SERVER = "handed_to_server"
+# Device registry field -> memo key. From the `device_info` of `client/hello`.
+_DEVICE_KEYS = {
+    "manufacturer": "manufacturer",
+    "model": "model",
+    "sw_version": "sw_version",
+}
 
 
 def _clean(value: str | None) -> str | None:
@@ -114,6 +121,49 @@ class PlayerMemo:
             entry[_KEY_HANDSHAKE_NAME] = cleaned
         if (cleaned := _clean(client_id)) is not None:
             entry[_KEY_CLIENT_ID] = cleaned
+
+    def remember_mesh_name(self, frozen_url: str, name: str | None) -> None:
+        """Record the name a Plum-Audio unit reports for this speaker.
+
+        A unit that holds a speaker saw its handshake, so this is the
+        speaker's own name at one remove. It is the one way to learn a good
+        name for a speaker Home Assistant never held.
+        """
+        if (cleaned := _clean(name)) is not None:
+            self._data.setdefault(frozen_url, {})[_KEY_MESH_NAME] = cleaned
+
+    def remember_device(
+        self,
+        frozen_url: str,
+        *,
+        manufacturer: str | None,
+        model: str | None,
+        sw_version: str | None,
+    ) -> None:
+        """Record what the speaker said about itself in its handshake.
+
+        All three are optional in the protocol. A field that is absent leaves
+        the stored value alone: a handshake that says less is not a statement
+        that the speaker changed.
+        """
+        entry = self._data.setdefault(frozen_url, {})
+        values = {
+            "manufacturer": manufacturer,
+            "model": model,
+            "sw_version": sw_version,
+        }
+        for field, value in values.items():
+            if (cleaned := _clean(value)) is not None:
+                entry[_DEVICE_KEYS[field]] = cleaned
+
+    def device_details(self, frozen_url: str) -> dict[str, str]:
+        """Known device registry fields for this speaker. Empty when none are."""
+        entry = self._data.get(frozen_url, {})
+        return {
+            field: str(entry[key])
+            for field, key in _DEVICE_KEYS.items()
+            if entry.get(key) is not None
+        }
 
     def repair_dial_urls(self) -> list[str]:
         """Undo a dial URL that points at a different address family.
@@ -188,6 +238,9 @@ class PlayerMemo:
     def display_name(self, frozen_url: str) -> str:
         """The best name we have, in descending order of trustworthiness.
 
+        Handshake name, then the name a unit reports, then the mDNS TXT name,
+        then the bare mDNS instance name, then the address.
+
         The handshake name is **never demoted**: once learned, a later
         mDNS-only sighting must not overwrite it, or the speaker's name flips
         every time it disconnects — precisely when the good name stops being
@@ -195,7 +248,12 @@ class PlayerMemo:
         still lands.
         """
         entry = self._data.get(frozen_url, {})
-        for key in (_KEY_HANDSHAKE_NAME, _KEY_TXT_NAME, _KEY_INSTANCE_NAME):
+        for key in (
+            _KEY_HANDSHAKE_NAME,
+            _KEY_MESH_NAME,
+            _KEY_TXT_NAME,
+            _KEY_INSTANCE_NAME,
+        ):
             if (name := entry.get(key)) is not None:
                 return str(name)
         return self._host_and_port(frozen_url)

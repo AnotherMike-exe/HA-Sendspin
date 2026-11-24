@@ -10,14 +10,17 @@ import hashlib
 import json
 from unittest.mock import AsyncMock, patch
 
+from aiosendspin.models.core import DeviceInfo
 from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEvent
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 import pytest
 
-from custom_components.sendspin.const import SOURCE_NONE
+from custom_components.sendspin.const import DOMAIN, SOURCE_NONE
 from custom_components.sendspin.legacy_client import ControllerSnapshot, Progress
 from custom_components.sendspin.mesh import parse_view
 from tests.fakes.fake_sendspin import FakeSendspinServer
@@ -880,3 +883,124 @@ async def test_the_cover_is_hashed_once_for_each_cover(
         assert sha256.call_count == 2
 
     assert first != second
+
+
+# --- The device and its name --------------------------------------------------
+
+
+def the_device(hass: HomeAssistant):
+    """The one speaker device."""
+    return dr.async_get(hass).async_get_device(identifiers={(DOMAIN, PLAYER_URL)})
+
+
+async def test_the_device_carries_what_the_handshake_says(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Manufacturer, model and software version come from `client/hello`."""
+    fake_server.clients_by_id[CLIENT_ID].device_info = DeviceInfo(
+        product_name="Satellite1 Dev Kit",
+        manufacturer="FutureProofHomes",
+        software_version="2026.10.1",
+    )
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    await flush(hass)
+
+    device = the_device(hass)
+    assert device.manufacturer == "FutureProofHomes"
+    assert device.model == "Satellite1 Dev Kit"
+    assert device.sw_version == "2026.10.1"
+
+
+async def test_a_speaker_that_says_nothing_about_itself_has_no_details(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The fields are optional in the protocol. Absent stays absent."""
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    await flush(hass)
+
+    device = the_device(hass)
+    assert device.manufacturer is None
+    assert device.model is None
+    assert device.sw_version is None
+
+
+async def test_the_identity_of_the_entity_is_the_frozen_url(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """These two values are what existing installs have. They must not move."""
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    entry = er.async_get(hass).async_get(entity_id(hass))
+
+    assert entry.unique_id == f"player:{PLAYER_URL}"
+    assert the_device(hass).identifiers == {(DOMAIN, PLAYER_URL)}
+
+
+async def test_the_name_a_unit_reports_beats_the_mdns_name(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A unit that holds a speaker saw its handshake, and passes the name on.
+
+    That is the one way to learn a good name for a speaker we never held. The
+    device takes the name. The entity id does not change, because dashboards
+    and automations are written against it.
+    """
+    payload = held_by_unit()
+    payload["units"][0]["players"][0]["name"] = "Kitchen Satellite"
+
+    await setup_with_mesh(hass, fake_server, payload)
+
+    assert the_device(hass).name == "Kitchen Satellite"
+    assert entity_id(hass) == "media_player.satellite1"
+    assert (
+        hass.states.get(entity_id(hass)).attributes["friendly_name"]
+        == "Kitchen Satellite"
+    )
+
+
+async def test_the_handshake_name_beats_the_name_a_unit_reports(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """What the speaker told us itself is the best name there is."""
+    fake_server.clients_by_id[CLIENT_ID].name = "FutureProofHomes - Satellite1"
+    payload = held_by_unit()
+    payload["units"][0]["players"][0]["name"] = "Kitchen Satellite"
+    entry, _assign = await setup_with_mesh(hass, fake_server, payload)
+
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    await flush(hass)
+    await repoll(hass, entry, payload)
+
+    assert the_device(hass).name == "FutureProofHomes - Satellite1"
+    assert entity_id(hass) == "media_player.satellite1"
+
+
+async def test_a_name_the_user_chose_is_not_replaced(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A learned name is the default name. The user's own name stays on top."""
+    entry, _assign = await setup_with_mesh(hass, fake_server, FIXTURE)
+    dr.async_get(hass).async_update_device(the_device(hass).id, name_by_user="Den")
+    payload = held_by_unit()
+    payload["units"][0]["players"][0]["name"] = "Kitchen Satellite"
+
+    await repoll(hass, entry, payload)
+
+    assert the_device(hass).name_by_user == "Den"
+    assert hass.states.get(entity_id(hass)).attributes["friendly_name"] == "Den"
+
+
+async def test_a_unit_that_only_knows_the_id_teaches_no_name(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A unit falls back to the player id for a name. An id is not a name."""
+    payload = held_by_unit()
+    payload["units"][0]["players"][0]["name"] = CLIENT_ID
+
+    await setup_with_mesh(hass, fake_server, payload)
+
+    assert the_device(hass).name == "Satellite1"

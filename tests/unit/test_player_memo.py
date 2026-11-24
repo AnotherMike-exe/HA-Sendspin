@@ -194,3 +194,41 @@ async def test_a_legitimate_relocation_is_left_alone(hass: HomeAssistant) -> Non
 
     assert memo.repair_dial_urls() == []
     assert memo.dial_url(URL) == moved
+
+
+# --- A name from a unit, and what the device says about itself ----------------
+
+
+async def test_a_name_from_a_unit_ranks_between_handshake_and_mdns(
+    hass: HomeAssistant,
+) -> None:
+    """A unit saw the handshake, so its name is better than any mDNS name."""
+    memo = PlayerMemo(hass)
+    memo.remember_discovery(
+        URL, instance_name="home-assistant-voice-a1b2c3", txt_name="Voice"
+    )
+
+    memo.remember_mesh_name(URL, "Home Assistant Voice PE - 01")
+    assert memo.display_name(URL) == "Home Assistant Voice PE - 01"
+
+    memo.remember_handshake(URL, name="Kitchen Voice", client_id="aa:bb")
+    assert memo.display_name(URL) == "Kitchen Voice"
+
+
+async def test_device_details_are_kept_and_never_erased_by_silence(
+    hass: HomeAssistant,
+) -> None:
+    """A later handshake with fewer fields must not blank what is known."""
+    memo = PlayerMemo(hass)
+
+    memo.remember_device(
+        URL, manufacturer="FutureProofHomes", model="Satellite1", sw_version="1.0"
+    )
+    memo.remember_device(URL, manufacturer=None, model=" ", sw_version="1.1")
+
+    assert memo.device_details(URL) == {
+        "manufacturer": "FutureProofHomes",
+        "model": "Satellite1",
+        "sw_version": "1.1",
+    }
+    assert memo.device_details("ws://unknown:8928/sendspin") == {}

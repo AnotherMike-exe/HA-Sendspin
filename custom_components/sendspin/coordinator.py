@@ -364,6 +364,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         )
         self._mesh_view = view
         self._mesh_fetched_at = self.hass.loop.time()
+        self._learn_from_mesh()
         self._async_sync_links()
         self._async_drop_duplicate_links()
         if not self._stopped:
@@ -600,27 +601,70 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             return
         before = self.memo.display_name(frozen_url)
         self.memo.remember_handshake(frozen_url, name=client.name, client_id=client_id)
+        # `device_info` is optional in `client/hello`, and so is each field.
+        hello = getattr(client, "info_or_none", None)
+        if (details := getattr(hello, "device_info", None)) is not None:
+            self.memo.remember_device(
+                frozen_url,
+                manufacturer=getattr(details, "manufacturer", None),
+                model=getattr(details, "product_name", None),
+                sw_version=getattr(details, "software_version", None),
+            )
         self.memo.async_schedule_save()
-
-        after = self.memo.display_name(frozen_url)
-        if after != before:
-            self._rename_device(frozen_url, after)
+        self._async_update_device(
+            frozen_url, rename=self.memo.display_name(frozen_url) != before
+        )
 
     @callback
-    def _rename_device(self, frozen_url: str, name: str) -> None:
-        """Apply a better name to the device once we learn one.
+    def _learn_from_mesh(self) -> None:
+        """Take the name a unit reports for a speaker it holds.
+
+        The unit saw the handshake, so this is the speaker's own name. Without
+        it a speaker Home Assistant never held keeps its mDNS instance name,
+        which for a third-party device reads `home-assistant-voice-a1b2c3`.
+        A handshake of our own still wins: see `PlayerMemo.display_name`.
+        """
+        for frozen_url in self._endpoints:
+            player = self._mesh_view.player_by_url(self.memo.dial_url(frozen_url))
+            # `parse_view` falls back to the id for a missing name.
+            if player is None or player.name == player.player_id:
+                continue
+            before = self.memo.display_name(frozen_url)
+            self.memo.remember_mesh_name(frozen_url, player.name)
+            if self.memo.display_name(frozen_url) != before:
+                self.memo.async_schedule_save()
+                self._async_update_device(frozen_url, rename=True)
+
+    @callback
+    def _async_update_device(self, frozen_url: str, *, rename: bool) -> None:
+        """Apply what we learned about a speaker to its device.
 
         A speaker's good name is only visible while it is attached, which is
         after its entity has already been created. Without this the device
-        keeps whatever it was called at adoption — usually its address.
+        keeps whatever it was called at adoption — usually its address. The
+        same is true of its manufacturer, model and software version.
 
         This sets the device's *original* name; any name the user has chosen
-        takes precedence in the UI and is untouched.
+        takes precedence in the UI and is untouched. The entity id and the
+        unique id are not touched either: a device rename does not move them.
+
+        `rename` is true only when the best name just changed. The name is not
+        pushed again on each handshake, so it cannot fight another writer.
         """
         registry = dr.async_get(self.hass)
         device = registry.async_get_device(identifiers={(DOMAIN, frozen_url)})
-        if device is not None and device.name != name:
-            registry.async_update_device(device.id, name=name)
+        if device is None:
+            return
+        wanted: dict[str, str] = dict(self.memo.device_details(frozen_url))
+        if rename:
+            wanted["name"] = self.memo.display_name(frozen_url)
+        changes = {
+            field: value
+            for field, value in wanted.items()
+            if getattr(device, field) != value
+        }
+        if changes:
+            registry.async_update_device(device.id, **changes)
 
     @callback
     def _async_drop_duplicate_links(self) -> None:
