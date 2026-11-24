@@ -130,8 +130,10 @@ These encode traps this project **will** hit. They are not style preferences.
 - **Language**: Python 3.14 (HA 2026.8.1 requires >= 3.14.2)
 - **Platform**: Home Assistant custom integration (not an add-on — see below)
 - **Key dependency**: `aiosendspin==9.1.0` — Sendspin **server** role,
-  `allow_unencrypted=True`. Plus `numpy` and `pillow`, which are hard
-  import-time requirements of the server module and are NOT both shipped by HA.
+  `allow_unencrypted=True`. Plus `numpy`, a hard import-time requirement of
+  the server module that HA does not ship. The server module also imports
+  Pillow, but HA core ships it and hassfest refuses it in a custom manifest.
+  Do not list `pillow` in `manifest.json`.
 - **Distribution**: HACS
 - **Testing**: `pytest` + `pytest-homeassistant-custom-component`
 - **Lint/format**: `ruff`
