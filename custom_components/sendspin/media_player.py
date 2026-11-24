@@ -188,10 +188,14 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return None
         if endpoint.source_label is not None:
             return endpoint.source_label
-        if endpoint.held_by_us:
+        if endpoint.held_by_us or endpoint.held_by_plum_unit:
             # We are the holder. Naming ourselves as the source was confusing
             # and put a value in the box that is in no dropdown — Home Assistant
             # holding a speaker on no stream *is* the none state.
+            #
+            # The same is true of a Plum unit. A unit detaches every speaker
+            # when a source dies and keeps the socket, so this is the usual
+            # state after a stream ends. Its name is no stream and no option.
             return SOURCE_NONE
         # Held by another server rather than on one of our streams. Saying so
         # is the honest answer; "None" read as "not routed anywhere".

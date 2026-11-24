@@ -291,3 +291,131 @@ def test_the_holding_server_is_recorded_for_attribution() -> None:
 
     assert found.held_by == "Music Assistant"
     assert found.held_by_server_id == "1d95425e51ef4db8b578d1b010c33414"
+
+
+# --- What the dropdown may show ----------------------------------------------
+
+
+def _with_source(unit_index: int, **fields) -> dict:
+    """The fixture plus one extra source on a unit."""
+    payload = json.loads(json.dumps(FIXTURE))
+    source = {
+        "source_id": "airplay-9",
+        "group_id": "g-extra",
+        "name": "Extra",
+        "player_ids": [],
+        "active": True,
+        "streaming": True,
+    }
+    source.update(fields)
+    payload["units"][unit_index]["sources"].append(source)
+    return payload
+
+
+def test_a_calibration_source_is_never_live() -> None:
+    """`cal:<player_id>` carries a test tone, and is not a stream to route to.
+
+    The unit keeps it in its view because its own router resolves sources
+    there. It streams while a tone plays, so the live filter alone lets it in.
+    """
+    view = parse_view(_with_source(0, source_id="cal:player-7204", name="cal"))
+
+    assert all(not s.source_id.startswith("cal:") for s in view.live_sources)
+    internal = next(s for s in view.sources if s.source_id == "cal:player-7204")
+    assert internal.internal is True
+    assert view.source_by_label(internal.label) is None
+
+
+def test_a_speaker_under_calibration_is_still_matched_to_its_source() -> None:
+    """Membership must still resolve, or the rescue takes the speaker back."""
+    view = parse_view(
+        _with_source(0, source_id="cal:player-7204", player_ids=["player-7204"])
+    )
+
+    assert view.source_for_player("player-7204").source_id == "cal:player-7204"
+
+
+def test_two_sources_with_one_name_get_distinct_labels() -> None:
+    """A label is what `select_source` resolves, so it must name one source."""
+    payload = _with_source(0, source_id="airplay-2", name="204 AP")
+
+    view = parse_view(payload)
+
+    labels = [s.label for s in view.sources if s.unit_id == "unit-7204"]
+    assert len(labels) == len(set(labels))
+    assert "Plum Amp100 / 204 AP (airplay-1)" in labels
+    assert "Plum Amp100 / 204 AP (airplay-2)" in labels
+    for label in labels:
+        assert view.source_by_label(label).label == label
+
+
+def test_two_units_with_one_name_get_distinct_labels() -> None:
+    """Units can share a name, and both call their AirPlay input `airplay-1`."""
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][1]["name"] = payload["units"][0]["name"]
+    payload["units"][1]["sources"][0]["name"] = "204 AP"
+
+    view = parse_view(payload)
+
+    labels = [s.label for s in view.sources]
+    assert len(labels) == len(set(labels))
+    assert "Plum Amp100 / 204 AP (unit-7204:airplay-1)" in labels
+    assert "Plum Amp100 / 204 AP (unit-7122:airplay-1)" in labels
+
+
+def test_a_label_does_not_change_when_a_stream_starts_or_stops() -> None:
+    """A label is built from every configured source, not from the live ones.
+
+    A dashboard or an automation stores the label. A label that depended on
+    what is playing would break it.
+    """
+    idle = parse_view(FIXTURE)
+    playing = json.loads(json.dumps(FIXTURE))
+    for unit in playing["units"]:
+        for source in unit["sources"]:
+            source["active"] = source["streaming"] = True
+
+    assert [s.label for s in parse_view(playing).sources] == [
+        s.label for s in idle.sources
+    ]
+    # No collision in the capture, so every label keeps the short form.
+    assert all("(" not in s.label for s in idle.sources)
+
+
+# --- Release ------------------------------------------------------------------
+
+
+async def _release_body(client_id: str | None) -> tuple[str, str, dict]:
+    from unittest.mock import AsyncMock, patch
+
+    from custom_components.sendspin.mesh import MeshClient
+
+    source = parse_view(FIXTURE).sources[0]
+    post = AsyncMock()
+    with patch.object(MeshClient, "_post", post):
+        await MeshClient(session=None).async_unassign(
+            source, "ws://192.168.7.151:8928/sendspin", client_id
+        )
+    return post.await_args.args
+
+
+async def test_release_sends_the_player_id_when_it_is_known() -> None:
+    """A unit before the 2026-11 change refuses a release with no `player_id`."""
+    host, path, body = await _release_body("98:A3:16:D0:9E:E8")
+
+    assert (host, path) == ("192.168.7.204", "release")
+    assert body == {
+        "source_id": "airplay-1",
+        "url": "ws://192.168.7.151:8928/sendspin",
+        "player_id": "98:A3:16:D0:9E:E8",
+    }
+
+
+async def test_release_sends_the_url_alone_when_the_id_is_unknown() -> None:
+    """The URL is the one identifier that is always in hand."""
+    _host, _path, body = await _release_body(None)
+
+    assert body == {
+        "source_id": "airplay-1",
+        "url": "ws://192.168.7.151:8928/sendspin",
+    }

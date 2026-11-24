@@ -9,12 +9,13 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, patch
 
-from aiosendspin.server.server import ClientDisconnectedEvent
+from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEvent
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
 import pytest
 
+from custom_components.sendspin.const import SOURCE_NONE
 from custom_components.sendspin.mesh import parse_view
 from tests.fakes.fake_sendspin import FakeSendspinServer
 from tests.integration.test_source_selection import (
@@ -238,3 +239,84 @@ async def test_volume_step_through_a_unit_keeps_the_mute(
     post.assert_awaited_once_with(
         UNIT_HOST, "volume", {"player_id": CLIENT_ID, "volume": 40, "muted": True}
     )
+
+
+# --- Source: "None" and what must never show ----------------------------------
+
+
+async def test_selecting_none_releases_the_speaker_and_holds_it(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """None takes the speaker off its stream, by id and by URL."""
+    payload = held_by_unit()
+    entry = await hand_to_unit(hass, fake_server, payload)
+    entry.runtime_data.memo.set_routed_away(PLAYER_URL, True)
+    fake_server.dial_calls.clear()
+
+    post = await call(hass, "select_source", FIXTURE, source=SOURCE_NONE)
+
+    post.assert_awaited_once_with(
+        UNIT_HOST,
+        "release",
+        {"source_id": "airplay-1", "url": PLAYER_URL, "player_id": CLIENT_ID},
+    )
+    # Home Assistant holds it again, on no stream.
+    assert [dial.url for dial in fake_server.dial_calls] == [PLAYER_URL]
+    assert entry.runtime_data.memo.routed_away(PLAYER_URL) is False
+
+    # The dial lands.
+    fake_server.clients_by_id[CLIENT_ID].is_connected = True
+    fake_server.emit(ClientConnectedEvent(client_id=CLIENT_ID))
+    await flush(hass)
+    assert hass.states.get(entity_id(hass)).attributes["source"] == SOURCE_NONE
+
+
+async def test_a_calibration_source_never_shows(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A speaker playing a calibration tone is on no stream the user can name."""
+    payload = json.loads(json.dumps(FIXTURE))
+    payload["units"][0]["sources"].append(
+        {
+            "source_id": f"cal:{CLIENT_ID}",
+            "group_id": "g-cal",
+            "name": f"cal:{CLIENT_ID}",
+            "player_ids": [CLIENT_ID],
+            "active": True,
+            "streaming": True,
+        }
+    )
+    payload["units"][0]["players"] = [
+        {"player_id": CLIENT_ID, "name": "Satellite1", "url": PLAYER_URL}
+    ]
+    entry = await hand_to_unit(hass, fake_server, payload)
+
+    state = hass.states.get(entity_id(hass))
+
+    assert state.attributes["source_list"] == [SOURCE_NONE]
+    assert state.attributes["source"] == SOURCE_NONE
+    assert state.state == "idle"
+    # And no controller link reads it.
+    assert not [k for k in entry.runtime_data.coordinator.links if "cal:" in k]
+
+
+async def test_a_speaker_a_unit_holds_on_no_stream_is_at_none(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A unit detaches its speakers when a source dies, and keeps the socket.
+
+    The unit is no stream, so its name must not show as the source. It stays in
+    the `held_by` attribute, and the speaker stays available.
+    """
+    payload = held_by_unit()
+    source = payload["units"][0]["sources"][0]
+    source["player_ids"] = []
+    source["active"] = source["streaming"] = False
+    await hand_to_unit(hass, fake_server, payload)
+
+    state = hass.states.get(entity_id(hass))
+
+    assert state.state == "idle"
+    assert state.attributes["source"] == SOURCE_NONE
+    assert state.attributes["source_list"] == [SOURCE_NONE]
+    assert state.attributes["held_by"] == "Plum Amp100"

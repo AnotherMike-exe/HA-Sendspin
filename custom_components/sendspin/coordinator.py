@@ -200,7 +200,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # server while failing to open the `ctrl:` link its stream needed.
             client_id = self._client_id_for(frozen_url, self.memo.dial_url(frozen_url))
             source = self._mesh_view.source_for_player(client_id)
-            if source is not None and source.unit_host:
+            # No link to an internal source. A calibration tone has no
+            # now-playing, and the source lives for a few seconds.
+            if source is not None and source.unit_host and not source.internal:
                 wanted[source.key] = source.unit_host
 
         for key in list(self._links):
@@ -748,6 +750,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         """Assemble what the entities render."""
         yielded_by_dial = self.host.yielded_urls
         endpoints: dict[str, EndpointSnapshot] = {}
+        unit_server_ids = {
+            s.unit_server_id for s in self._mesh_view.sources if s.unit_server_id
+        }
 
         for frozen_url in self._endpoints:
             dial_url = self.memo.dial_url(frozen_url)
@@ -773,6 +778,11 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 held_by = mesh_player.unit_host
 
             assigned = self._mesh_view.source_for_player(client_id)
+            if assigned is not None and assigned.internal:
+                # On a calibration tone, which is no stream the user can name.
+                # The rescue still reads the raw membership, so the speaker is
+                # not taken back in the middle of a measurement.
+                assigned = None
 
             source_key = assigned.key if assigned is not None else None
             media = self._media_for(source_key)
@@ -804,6 +814,15 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 or (
                     mesh_player is not None
                     and mesh_player.held_by_server_id == self.host.server_id
+                ),
+                held_by_plum_unit=bool(
+                    mesh_player is not None
+                    and not connected
+                    and (
+                        # In a unit's own `players` list: that unit holds it.
+                        mesh_player.held_by_server_id is None
+                        or mesh_player.held_by_server_id in unit_server_ids
+                    )
                 ),
                 known_to_mesh=mesh_player is not None,
                 media_title=media.title if media else None,

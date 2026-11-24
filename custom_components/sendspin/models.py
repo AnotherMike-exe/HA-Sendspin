@@ -74,6 +74,12 @@ class EndpointSnapshot:
     ourselves as this speaker's *source* is wrong either way — we originate no
     audio, so holding a speaker on no stream is the none state."""
 
+    held_by_plum_unit: bool = False
+    """A Plum-Audio unit is the holder.
+
+    A unit is never a source. Its streams are, and they are named one by one,
+    so a speaker a unit holds on no stream is at none."""
+
     held_by_unit_host: str | None = None
     """The Plum unit currently holding this speaker, if any. Volume has to be
     commanded through whoever holds the connection."""
