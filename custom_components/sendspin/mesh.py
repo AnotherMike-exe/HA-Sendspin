@@ -361,6 +361,13 @@ class MeshClient:
         Home Assistant can only command a speaker over its own connection, and
         handing a speaker to a unit means giving that connection up. Without
         this, routing a speaker would silently cost you the volume control.
+
+        This is the **endpoint** level. Plum has two more volumes, the group
+        level and the source level, and neither goes through this call.
+
+        The caller sends `volume` and `muted` together whenever it knows both.
+        An older unit requires `volume` and reads an absent `muted` as false.
+        A field that is None is unknown, and is left out, not invented.
         """
         body: dict[str, Any] = {"player_id": player_id}
         if volume is not None:

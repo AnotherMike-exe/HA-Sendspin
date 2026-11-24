@@ -491,12 +491,16 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             raise HomeAssistantError(
                 f"Nothing is holding {endpoint.name}, so its volume cannot be set"
             )
+        # Always send the pair. A unit before the 2026-11 change refuses a call
+        # that has no `volume`, and reads an absent `muted` as false. So a mute
+        # alone fails there, and a volume alone unmutes. A current unit accepts
+        # either field alone and gets the same result from the pair.
         await self._call_mesh(
             self.coordinator.mesh.async_set_volume(
                 endpoint.held_by_unit_host,
                 endpoint.client_id,
-                volume=volume,
-                muted=muted,
+                volume=volume if volume is not None else endpoint.volume,
+                muted=muted if muted is not None else endpoint.muted,
             )
         )
         await self.coordinator.async_refresh_mesh()
