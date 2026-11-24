@@ -35,7 +35,9 @@ slice, on its own.
   dropping off the mesh with no polling script.
 - 🎵 **Now-playing, cover art and transport** — title, artist, album, a
   progress bar and play/pause/next/previous, for a speaker **whoever is driving
-  it**, including Music Assistant.
+  it**, including Music Assistant. Repeat and shuffle show when the stream has
+  them, as a Spotify stream does. See [docs/DASHBOARD.md](docs/DASHBOARD.md)
+  for an example card and the controls each kind of source gives.
 - 🔁 **Both directions.** Other Sendspin servers appear in the same dropdown as
   your streams, so a speaker can be handed to Music Assistant and taken back.
   Only servers you cannot already reach by naming a stream are listed.

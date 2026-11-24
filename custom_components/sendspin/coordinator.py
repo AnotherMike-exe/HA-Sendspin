@@ -41,7 +41,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DEFAULT_SERVER_PORT as SENDSPIN_SERVER_PORT
 from .const import DEFAULT_WEBSOCKET_PATH, DOMAIN
-from .legacy_client import LegacyControllerClient
+from .legacy_client import ControllerSnapshot, LegacyControllerClient
 from .mesh import MESH_POLL_INTERVAL_S, MeshClient, MeshView
 from .models import EndpointSnapshot, SendspinData
 from .server_host import ServerHost, player_role
@@ -91,6 +91,27 @@ _INTERESTING_EVENTS = (
     ClientRemovedEvent,
     ClientUpdatedEvent,
 )
+
+
+def _transport_state(media: ControllerSnapshot | None) -> str | None:
+    """What a stream does now: `playing`, `paused`, `stopped` or unknown.
+
+    `group/update` carries the authoritative transport state, and the speed in
+    the progress refines it. Plum-Audio keeps a paused group at `playing` and
+    sets the speed to zero, so `playing` with a zero speed is a pause.
+
+    A stale progress never makes a stopped stream play: the last speed a server
+    sent stays in the snapshot after the stream ends.
+    """
+    if media is None:
+        return None
+    progress = media.progress
+    if media.playback_state == "playing":
+        return "paused" if progress is not None and not progress.playing else "playing"
+    if media.playback_state is not None:
+        return media.playback_state
+    # No group state yet. A running speed is the one thing that says anything.
+    return "playing" if progress is not None and progress.playing else None
 
 
 class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
@@ -200,7 +221,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # server while failing to open the `ctrl:` link its stream needed.
             client_id = self._client_id_for(frozen_url, self.memo.dial_url(frozen_url))
             source = self._mesh_view.source_for_player(client_id)
-            if source is not None and source.unit_host:
+            # No link to an internal source. A calibration tone has no
+            # now-playing, and the source lives for a few seconds.
+            if source is not None and source.unit_host and not source.internal:
                 wanted[source.key] = source.unit_host
 
         for key in list(self._links):
@@ -341,6 +364,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         )
         self._mesh_view = view
         self._mesh_fetched_at = self.hass.loop.time()
+        self._learn_from_mesh()
         self._async_sync_links()
         self._async_drop_duplicate_links()
         if not self._stopped:
@@ -577,27 +601,70 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             return
         before = self.memo.display_name(frozen_url)
         self.memo.remember_handshake(frozen_url, name=client.name, client_id=client_id)
+        # `device_info` is optional in `client/hello`, and so is each field.
+        hello = getattr(client, "info_or_none", None)
+        if (details := getattr(hello, "device_info", None)) is not None:
+            self.memo.remember_device(
+                frozen_url,
+                manufacturer=getattr(details, "manufacturer", None),
+                model=getattr(details, "product_name", None),
+                sw_version=getattr(details, "software_version", None),
+            )
         self.memo.async_schedule_save()
-
-        after = self.memo.display_name(frozen_url)
-        if after != before:
-            self._rename_device(frozen_url, after)
+        self._async_update_device(
+            frozen_url, rename=self.memo.display_name(frozen_url) != before
+        )
 
     @callback
-    def _rename_device(self, frozen_url: str, name: str) -> None:
-        """Apply a better name to the device once we learn one.
+    def _learn_from_mesh(self) -> None:
+        """Take the name a unit reports for a speaker it holds.
+
+        The unit saw the handshake, so this is the speaker's own name. Without
+        it a speaker Home Assistant never held keeps its mDNS instance name,
+        which for a third-party device reads `home-assistant-voice-a1b2c3`.
+        A handshake of our own still wins: see `PlayerMemo.display_name`.
+        """
+        for frozen_url in self._endpoints:
+            player = self._mesh_view.player_by_url(self.memo.dial_url(frozen_url))
+            # `parse_view` falls back to the id for a missing name.
+            if player is None or player.name == player.player_id:
+                continue
+            before = self.memo.display_name(frozen_url)
+            self.memo.remember_mesh_name(frozen_url, player.name)
+            if self.memo.display_name(frozen_url) != before:
+                self.memo.async_schedule_save()
+                self._async_update_device(frozen_url, rename=True)
+
+    @callback
+    def _async_update_device(self, frozen_url: str, *, rename: bool) -> None:
+        """Apply what we learned about a speaker to its device.
 
         A speaker's good name is only visible while it is attached, which is
         after its entity has already been created. Without this the device
-        keeps whatever it was called at adoption — usually its address.
+        keeps whatever it was called at adoption — usually its address. The
+        same is true of its manufacturer, model and software version.
 
         This sets the device's *original* name; any name the user has chosen
-        takes precedence in the UI and is untouched.
+        takes precedence in the UI and is untouched. The entity id and the
+        unique id are not touched either: a device rename does not move them.
+
+        `rename` is true only when the best name just changed. The name is not
+        pushed again on each handshake, so it cannot fight another writer.
         """
         registry = dr.async_get(self.hass)
         device = registry.async_get_device(identifiers={(DOMAIN, frozen_url)})
-        if device is not None and device.name != name:
-            registry.async_update_device(device.id, name=name)
+        if device is None:
+            return
+        wanted: dict[str, str] = dict(self.memo.device_details(frozen_url))
+        if rename:
+            wanted["name"] = self.memo.display_name(frozen_url)
+        changes = {
+            field: value
+            for field, value in wanted.items()
+            if getattr(device, field) != value
+        }
+        if changes:
+            registry.async_update_device(device.id, **changes)
 
     @callback
     def _async_drop_duplicate_links(self) -> None:
@@ -709,7 +776,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 return key
         return None
 
-    def _media_for(self, source_key: str | None):
+    def _media_for(self, source_key: str | None) -> ControllerSnapshot | None:
         """The now-playing observed on a source, if we are observing it."""
         link = self._links.get(source_key) if source_key else None
         if link is None or not link.snapshot.connected:
@@ -748,6 +815,9 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
         """Assemble what the entities render."""
         yielded_by_dial = self.host.yielded_urls
         endpoints: dict[str, EndpointSnapshot] = {}
+        unit_server_ids = {
+            s.unit_server_id for s in self._mesh_view.sources if s.unit_server_id
+        }
 
         for frozen_url in self._endpoints:
             dial_url = self.memo.dial_url(frozen_url)
@@ -773,18 +843,27 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 held_by = mesh_player.unit_host
 
             assigned = self._mesh_view.source_for_player(client_id)
+            if assigned is not None and assigned.internal:
+                # On a calibration tone, which is no stream the user can name.
+                # The rescue still reads the raw membership, so the speaker is
+                # not taken back in the middle of a measurement.
+                assigned = None
 
             source_key = assigned.key if assigned is not None else None
             media = self._media_for(source_key)
             if media is None and mesh_player is not None:
                 source_key = self._link_key_for_server(mesh_player.held_by_server_id)
                 media = self._media_for(source_key)
-            if media is None and not connected:
+            if media is None and not connected and mesh_player is None:
                 # Held by something we cannot identify — a third-party speaker
                 # on a non-Plum server is in no mesh view at all. When exactly
                 # one observed server is playing, it is the only candidate;
                 # with two we decline to guess rather than label a speaker with
                 # the wrong track.
+                #
+                # Only for a speaker the mesh does not know. One the mesh does
+                # know is accounted for: a unit holds it, or the mesh names the
+                # server that does, and that server was tried above.
                 source_key = self._sole_playing_link()
                 media = self._media_for(source_key)
 
@@ -798,6 +877,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 volume=volume,
                 muted=muted,
                 source_label=assigned.label if assigned is not None else None,
+                source_kind=assigned.kind if assigned is not None else None,
                 source_streaming=assigned.streaming if assigned is not None else False,
                 held_by_unit_host=held_by,
                 held_by_us=connected
@@ -805,10 +885,20 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                     mesh_player is not None
                     and mesh_player.held_by_server_id == self.host.server_id
                 ),
+                held_by_plum_unit=bool(
+                    mesh_player is not None
+                    and not connected
+                    and (
+                        # In a unit's own `players` list: that unit holds it.
+                        mesh_player.held_by_server_id is None
+                        or mesh_player.held_by_server_id in unit_server_ids
+                    )
+                ),
                 known_to_mesh=mesh_player is not None,
                 media_title=media.title if media else None,
                 media_artist=media.artist if media else None,
                 media_album=media.album if media else None,
+                media_album_artist=media.album_artist if media else None,
                 media_position=media.progress.position_s
                 if media and media.progress
                 else None,
@@ -818,14 +908,11 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 media_duration=media.progress.duration_s
                 if media and media.progress
                 else None,
-                media_playing=bool(
-                    media
-                    and (
-                        media.playback_state == "playing"
-                        or (media.progress is not None and media.progress.playing)
-                    )
-                ),
+                media_playing=_transport_state(media) == "playing",
+                media_state=_transport_state(media),
                 media_commands=media.supported_commands if media else (),
+                media_repeat=media.repeat if media else None,
+                media_shuffle=media.shuffle if media else None,
                 media_link=source_key if media is not None else None,
                 held_by_server=(
                     mesh_player.held_by

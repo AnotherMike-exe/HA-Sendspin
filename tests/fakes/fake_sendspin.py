@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from aiosendspin.models.types import ConnectionReason
 
@@ -87,6 +88,13 @@ class FakeSendspinClient:
         self.active_role_ids = (
             ["player@v1"] if active_role_ids is None else active_role_ids
         )
+        self.device_info: object | None = None
+        """The optional `device_info` of `client/hello`. Most speakers send none."""
+
+    @property
+    def info_or_none(self) -> object | None:
+        """The `client/hello` payload, as far as the integration reads it."""
+        return SimpleNamespace(device_info=self.device_info)
 
     def roles_by_family(self, family: str) -> list[FakePlayerRole]:
         """Only the player family is modelled."""

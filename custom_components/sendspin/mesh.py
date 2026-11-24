@@ -29,7 +29,8 @@ is a property of the API, not a decision made here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 import logging
 from typing import Any
 
@@ -43,6 +44,13 @@ REQUEST_TIMEOUT_S = 4.0
 # Plum aggregates peer state on a 2s loop, so polling faster than that buys
 # nothing but load. A route is reflected back within roughly two cycles.
 MESH_POLL_INTERVAL_S = 5.0
+
+
+# The kinds of input a Plum-Audio unit has, by the prefix of the source id.
+SOURCE_KINDS = ("airplay", "bluetooth", "spotify")
+
+# Source ids a unit makes for its own use. Never offered, never named.
+_INTERNAL_SOURCE_PREFIXES = ("cal:",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,15 +81,47 @@ class MeshSource:
     source_muted: bool | None = None
     supports_source_volume: bool = False
 
+    label_suffix: str = ""
+    """Set by `parse_view` only when two sources would otherwise share a label."""
+
     @property
     def key(self) -> str:
         """Globally unique id. `source_id` alone is only unique per unit."""
         return f"{self.unit_id}:{self.source_id}"
 
     @property
-    def label(self) -> str:
-        """What the user picks in the source dropdown."""
+    def base_label(self) -> str:
+        """`Unit / Source`, which is unique on an ordinary mesh."""
         return f"{self.unit_name} / {self.name}"
+
+    @property
+    def label(self) -> str:
+        """What the user picks in the source dropdown.
+
+        Unique in a view, because `select_source` resolves a source from it.
+        Stable, because it is built from the configured sources and not from
+        the live ones: a stream that starts or stops changes no label.
+        """
+        return f"{self.base_label}{self.label_suffix}"
+
+    @property
+    def kind(self) -> str | None:
+        """`airplay`, `bluetooth` or `spotify`, or None for anything else.
+
+        Read from the id, which a unit builds as `<kind>-<n>`. The view has no
+        field for it. An id that is not one of these is unknown, not guessed.
+        """
+        prefix = self.source_id.partition("-")[0]
+        return prefix if prefix in SOURCE_KINDS else None
+
+    @property
+    def internal(self) -> bool:
+        """A source the unit makes for itself, which is never a routing choice.
+
+        `cal:<player_id>` carries a calibration tone to one speaker. The unit
+        keeps it in the view because its own router resolves sources there.
+        """
+        return self.source_id.startswith(_INTERNAL_SOURCE_PREFIXES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +173,9 @@ class MeshView:
 
     def source_by_label(self, label: str) -> MeshSource | None:
         """Look a source up by the label shown to the user."""
-        return next((s for s in self.sources if s.label == label), None)
+        return next(
+            (s for s in self.sources if s.label == label and not s.internal), None
+        )
 
     def player_by_url(self, url: str | None) -> MeshPlayer | None:
         """A speaker matched by the address we dial it on.
@@ -194,9 +236,12 @@ class MeshView:
         tolerant flag, held true for up to SOURCE_IDLE_TIMEOUT_S (300s by
         default) after a sender walks away, which is the residual lag on a
         source disappearing.
+
+        Never an internal source. A calibration tone streams, so the liveness
+        test alone lets it in.
         """
         return sorted(
-            (s for s in self.sources if s.active or s.streaming),
+            (s for s in self.sources if (s.active or s.streaming) and not s.internal),
             key=lambda s: s.label.lower(),
         )
 
@@ -282,7 +327,35 @@ def parse_view(payload: dict[str, Any]) -> MeshView:
                 )
             )
 
-    return MeshView(sources=tuple(sources), players=tuple(players), reachable=True)
+    return MeshView(
+        sources=_with_unique_labels(sources), players=tuple(players), reachable=True
+    )
+
+
+def _with_unique_labels(sources: list[MeshSource]) -> tuple[MeshSource, ...]:
+    """Give each source a label no other source in the view has.
+
+    `Unit / Source` is unique on an ordinary mesh and stays as it is. Two inputs
+    on one unit can share a name, and two units can share a name, so a clash
+    adds the source id, and then the unit id if the source id is not enough.
+
+    Every configured source counts, live or not. A label must not change when
+    another stream starts.
+    """
+    visible = [s for s in sources if not s.internal]
+    clashes = Counter(s.base_label for s in visible)
+    by_source_id = Counter(
+        (s.base_label, s.source_id) for s in visible if clashes[s.base_label] > 1
+    )
+    labelled: list[MeshSource] = []
+    for source in sources:
+        if source.internal or clashes[source.base_label] < 2:
+            labelled.append(source)
+        elif by_source_id[(source.base_label, source.source_id)] < 2:
+            labelled.append(replace(source, label_suffix=f" ({source.source_id})"))
+        else:
+            labelled.append(replace(source, label_suffix=f" ({source.key})"))
+    return tuple(labelled)
 
 
 class MeshClient:
@@ -342,7 +415,13 @@ class MeshClient:
     async def async_unassign(
         self, source: MeshSource, speaker_url: str, client_id: str | None
     ) -> None:
-        """Take a speaker off a source and hand it back."""
+        """Take a speaker off a source and hand it back.
+
+        `player_id` goes in the body whenever it is known. A unit before the
+        2026-11 change requires it and answers HTTP 400 without it, which this
+        raises as `MeshError`: the speaker then stays where it is. A current
+        unit accepts the URL alone.
+        """
         body: dict[str, Any] = {"source_id": source.source_id, "url": speaker_url}
         if client_id is not None:
             body["player_id"] = client_id
@@ -361,6 +440,13 @@ class MeshClient:
         Home Assistant can only command a speaker over its own connection, and
         handing a speaker to a unit means giving that connection up. Without
         this, routing a speaker would silently cost you the volume control.
+
+        This is the **endpoint** level. Plum has two more volumes, the group
+        level and the source level, and neither goes through this call.
+
+        The caller sends `volume` and `muted` together whenever it knows both.
+        An older unit requires `volume` and reads an absent `muted` as false.
+        A field that is None is unknown, and is left out, not invented.
         """
         body: dict[str, Any] = {"player_id": player_id}
         if volume is not None:

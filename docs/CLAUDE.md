@@ -28,8 +28,9 @@ and independently of Music Assistant.
 - **Other servers as sources** — a speaker can be handed to Music Assistant and
   taken back, in the same dropdown as the mesh's own streams.
 
-**Not yet delivered**: per-speaker volume for a speaker another server holds.
-See `docs/OPEN-QUESTIONS.md` §8.
+**Not offered, by decision**: volume for a speaker another server holds, and
+any entity for a source, a group or a stream. See `docs/OPEN-QUESTIONS.md` §8
+and §9. The entity volume is the **endpoint** level only.
 
 ### Why this exists
 Music Assistant already provides discovery, `media_player` entities, and
@@ -44,7 +45,9 @@ controller-role implementation with no upstream to lean on. Spec drift is this
 project's problem to track, not MA's.
 
 ### Project Context
-- **Stage**: scaffold — structure only, no behaviour implemented
+- **Stage**: v0.3.x, in use on the owner's network. Discovery, adoption,
+  source selection, now-playing, cover art, transport and volume work, and the
+  media controls are ready for dashboards (`docs/DASHBOARD.md`).
 - **Team Size**: solo
 - **Priority Focus**: correctness over surface area; the identity and arbitration
   traps in `docs/OPEN-QUESTIONS.md` are the real risk
@@ -130,8 +133,10 @@ These encode traps this project **will** hit. They are not style preferences.
 - **Language**: Python 3.14 (HA 2026.8.1 requires >= 3.14.2)
 - **Platform**: Home Assistant custom integration (not an add-on — see below)
 - **Key dependency**: `aiosendspin==9.1.0` — Sendspin **server** role,
-  `allow_unencrypted=True`. Plus `numpy` and `pillow`, which are hard
-  import-time requirements of the server module and are NOT both shipped by HA.
+  `allow_unencrypted=True`. Plus `numpy`, a hard import-time requirement of
+  the server module that HA does not ship. The server module also imports
+  Pillow, but HA core ships it and hassfest refuses it in a custom manifest.
+  Do not list `pillow` in `manifest.json`.
 - **Distribution**: HACS
 - **Testing**: `pytest` + `pytest-homeassistant-custom-component`
 - **Lint/format**: `ruff`
@@ -175,10 +180,10 @@ custom_components/sendspin/   # The integration — dir name == manifest domain
   manifest.json               # Domain, zeroconf, requirements, version
   const.py                    # DOMAIN, service names, config keys
   config_flow.py              # User + zeroconf discovery flows
-  coordinator.py              # Controller websocket -> entity state (push)
+  coordinator.py              # Server events + mesh poll -> entity state (push)
   discovery.py                # Parses mDNS records from HA core
-  media_player.py             # One entity per active stream/group
-  services.yaml               # Routing services
+  media_player.py             # One entity per adopted speaker (endpoint)
+  services.yaml               # Adoption lifecycle services (not routing)
   icons.json                  # Service icons (HA 2024.2+ location)
   strings.json                # Source strings
   translations/en.json        # Literal strings — no [%key%] refs in customs
@@ -255,18 +260,17 @@ deliberately — an unpinned bump silently changes which HA release is validated
 
 ---
 
-## Outstanding TODOs in the scaffold
+## Outstanding work
 
-Search for `TODO` — the notable ones:
+The code has no `TODO` markers. Open design points are in
+`docs/OPEN-QUESTIONS.md`: §10 is the live one.
 
-- `manifest.json` — `documentation`, `issue_tracker`, `codeowners` are
-  placeholders. **hassfest and the HACS action will fail until these are real.**
-- `manifest.json` / `const.py` — the mDNS service type `_sendspin._tcp.local.` is
-  a **guess**. Confirm against the Sendspin spec and Plum-Audio's `mesh/avahi.py`.
-- `manifest.json` — `aiosendspin>=0.0.0` needs a real version pin.
-- `custom_components/sendspin/brand/` — needs a real `icon.png` (binary, not
-  scaffolded).
-- Every module raises `NotImplementedError`. Nothing works yet by design.
+- `hassfest` runs only in CI. `tests/unit/test_manifest.py` holds the manifest
+  rules that failed there, so they fail locally first.
+- The Plum-Audio mesh API is changing: `volume` will accept `muted` alone, and
+  `release` will accept `url` alone. The integration must work against a unit
+  before and after that change. Do not remove the paired `volume` + `muted`
+  body or the `player_id` in `release`.
 
 ---
 

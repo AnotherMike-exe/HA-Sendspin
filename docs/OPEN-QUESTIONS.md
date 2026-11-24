@@ -8,7 +8,8 @@ Status legend: 🔴 blocking · 🟡 needs a design pass · 🟢 decided
 
 **Read §7 first.** It is the only section describing what the hardware actually
 did rather than what was intended, and most of the decisions above were settled
-by it. §8 is the one live question.
+by it. §9 records the owner's decisions of 2026-11-24, which override any older
+text here. §10 is the one live question.
 
 ---
 
@@ -458,7 +459,11 @@ So the gap is one of the two hops, and which one is worth knowing:
 
 ---
 
-## 8. Per-speaker volume for a speaker another server holds — 🟡 needs a decision
+## 8. Per-speaker volume for a speaker another server holds — 🟢 decided 2026-11-24
+
+> **Decided: option 3.** The entity volume is the endpoint level and nothing
+> else. Option 1 presents a group level as a speaker level, and option 2 needs
+> a stream entity. §9 rules out both. The text below is kept as the record.
 
 **Question**: how should Home Assistant offer volume for a speaker it does not
 hold?
@@ -488,3 +493,68 @@ would be quietly wrong in exactly the multi-room case this project exists for.
 2. Expose stream volume as a separate control — the stream entity described in
    the original plan, which was deferred and never built.
 3. Leave it absent, as now, and rely on the holding server's own UI.
+
+---
+
+## 9. Dashboard controls — 🟢 decided 2026-11-24
+
+The owner made these decisions on 2026-11-24. They override older text in this
+file where the two disagree.
+
+| Decision | What it rules out |
+|---|---|
+| One `media_player` for each endpoint (a speaker, or the player of a unit). | An entity for a source, a group or a stream. |
+| Routing is only the source dropdown, the same as the Plum web GUI. | `MediaPlayerEntityFeature.GROUPING`, `group_members`, join and unjoin. |
+| `source_list` holds the streams that are live on the network at that time and available to that endpoint, plus `None`. | A configured input with no sender, and the internal `cal:` sources. |
+| `None` is a true none (Plum-Audio `ROUTING-MODEL.md` rule 1). | A speaker that goes back on a stream by itself. |
+| To select a source puts that speaker on that stream. That is grouping. | A second way to group. |
+| The entity volume is the endpoint level. | A group volume entity and a source volume entity. |
+| Custody stays mesh-only: adopt and release through the mesh API on port 5001. | Pairing work in this integration. |
+
+What the code does with them, as of the `feature/dashboard-controls` branch:
+
+- `source_list` is the live streams and `None`. The stream a speaker is on stays
+  in its own list after the sender leaves, until the speaker is moved, so the
+  entity never reports a source that is not in its own options.
+- A speaker that a Plum unit holds on no stream reports `None`. It reported the
+  unit name before.
+- `None` sends `release` to the unit, with the URL, and with `player_id` when
+  it is known. Home Assistant then holds the speaker on no stream. When the id
+  is not known, the mesh does not show the speaker on a stream, so there is no
+  `release` to send and Home Assistant takes the speaker with its own dial.
+- Transport, state, position, cover and the device registry: see
+  [ARCHITECTURE §3.4](ARCHITECTURE.md) and [DASHBOARD.md](DASHBOARD.md).
+
+Not proven on a live Home Assistant yet. See the list in §10.
+
+## 10. Other servers in the source dropdown — 🟡 needs a decision
+
+**Question**: does another Sendspin server, such as Music Assistant, stay in
+`source_list`?
+
+The decision in §9 says the list is the live streams and `None`. The list also
+holds each Sendspin server that Home Assistant can see and that has no mesh
+API, and the current source of a speaker on such a server is the server name.
+That is a shipped feature (README, "Both directions"), and it is the one
+way to give a speaker back to Music Assistant from a dashboard. It was kept on
+2026-11-24 because to remove it is a second decision, not a consequence of the
+first.
+
+**Options:**
+
+1. Keep it. The list is then streams, servers and `None`.
+2. Remove it. A speaker goes back to Music Assistant only when Music Assistant
+   starts playback to it. The `held_by` attribute still names the server.
+
+**Related, and also open:** a speaker handed to a server that has no mesh API
+is unavailable while that server plays nothing, because nothing can see it.
+The dropdown is then disabled, and `sendspin.reclaim_player` is the way back.
+
+**Only a live Home Assistant can prove:**
+
+- that the media control card shows and hides the buttons as the stream changes;
+- that the progress bar is right after a link joins mid-track, on real clocks;
+- that mute and volume through a unit work against a unit before and after the
+  `volume` API change;
+- that the existing entities keep their `entity_id` and history after the update;
+- that `hassfest` passes in CI with `pillow` removed.

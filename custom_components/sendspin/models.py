@@ -53,6 +53,10 @@ class EndpointSnapshot:
     on nothing. Derived from the mesh view, which is the only place that
     knows — a Sendspin server tells outsiders nothing about its groups."""
 
+    source_kind: str | None = None
+    """`airplay`, `bluetooth` or `spotify` for a stream on a Plum-Audio unit,
+    when the unit's source id says which. None for no stream."""
+
     source_streaming: bool = False
     """Audio is actually flowing on the assigned stream. We can know this even
     when another server holds the speaker, because it comes from the mesh."""
@@ -74,6 +78,12 @@ class EndpointSnapshot:
     ourselves as this speaker's *source* is wrong either way — we originate no
     audio, so holding a speaker on no stream is the none state."""
 
+    held_by_plum_unit: bool = False
+    """A Plum-Audio unit is the holder.
+
+    A unit is never a source. Its streams are, and they are named one by one,
+    so a speaker a unit holds on no stream is at none."""
+
     held_by_unit_host: str | None = None
     """The Plum unit currently holding this speaker, if any. Volume has to be
     commanded through whoever holds the connection."""
@@ -81,11 +91,21 @@ class EndpointSnapshot:
     media_title: str | None = None
     media_artist: str | None = None
     media_album: str | None = None
+    media_album_artist: str | None = None
     media_position: float | None = None
     media_position_updated_at: float | None = None
     media_duration: float | None = None
     media_playing: bool = False
+    media_state: str | None = None
+    """`playing`, `paused` or `stopped`, as the link that reads the stream
+    reports it. None when no link reads it, or the link reports no state.
+
+    Kept apart from the title on purpose. A server keeps the last title after a
+    stream stops, so a title says nothing about what the stream does now."""
     media_commands: tuple[str, ...] = ()
+    media_repeat: str | None = None
+    """`off`, `one` or `all`, when the stream reports a repeat mode."""
+    media_shuffle: bool | None = None
     media_link: str | None = None
     """Which controller link supplies this endpoint's now-playing, and takes
     its transport commands. None when nothing is observing the stream."""

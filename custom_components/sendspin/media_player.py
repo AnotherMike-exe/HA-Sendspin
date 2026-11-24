@@ -4,12 +4,17 @@ One durable entity per **physical endpoint** — a speaker — not one per strea
 Streams come and go constantly; anchoring entities to them would churn the
 entity registry and discard the user's renames, areas and icons on every
 reconnect. Instead the stream an endpoint is assigned to becomes state *on* the
-endpoint, and in M4 the available streams become its `source_list`.
+endpoint, and the streams that are live become its `source_list`.
 
-M2 scope: adoption, presence, volume and mute. There is no transport, no
-metadata and no source list yet, because Home Assistant originates no audio and
-nothing is reading a stream. `supported_features` reflects that honestly rather
-than offering controls that cannot be honoured.
+The source dropdown is the one routing control. To select a source puts the
+speaker on that stream, and that is grouping: no `GROUPING` feature, no
+`group_members`, no join. `None` is a true none.
+
+`supported_features` is read from the endpoint and its current stream on each
+state write, so the entity offers only the controls that work now. The volume
+is the endpoint level, never the group level or the source level.
+
+docs/DASHBOARD.md has the feature table for each kind of source.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    RepeatMode,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -35,6 +41,9 @@ from .entity import SendspinEndpointEntity
 from .mesh import MeshError
 from .server_host import player_role
 
+# One press of volume up or down, in percent of the endpoint level.
+VOLUME_STEP_PERCENT = 5
+
 # Sendspin command name -> the Home Assistant feature it satisfies.
 _TRANSPORT_FEATURES = {
     "play": MediaPlayerEntityFeature.PLAY,
@@ -42,6 +51,46 @@ _TRANSPORT_FEATURES = {
     "stop": MediaPlayerEntityFeature.STOP,
     "next": MediaPlayerEntityFeature.NEXT_TRACK,
     "previous": MediaPlayerEntityFeature.PREVIOUS_TRACK,
+    "repeat_off": MediaPlayerEntityFeature.REPEAT_SET,
+    "repeat_one": MediaPlayerEntityFeature.REPEAT_SET,
+    "repeat_all": MediaPlayerEntityFeature.REPEAT_SET,
+    "shuffle": MediaPlayerEntityFeature.SHUFFLE_SET,
+    "unshuffle": MediaPlayerEntityFeature.SHUFFLE_SET,
+}
+
+# Source kind -> the name a card shows for it.
+_KIND_NAMES = {"airplay": "AirPlay", "bluetooth": "Bluetooth", "spotify": "Spotify"}
+
+# The `source_kind` of a speaker that another Sendspin server plays to.
+KIND_SERVER = "server"
+
+# Leading bytes -> image type. A server can send any of these, whatever format
+# the hello asked for.
+_IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+# The hello asks for JPEG, so that is the guess for bytes nothing recognises.
+_DEFAULT_IMAGE_TYPE = "image/jpeg"
+
+
+def image_content_type(image: bytes) -> str:
+    """The MIME type of a cover, from the bytes of the cover."""
+    for signature, content_type in _IMAGE_SIGNATURES:
+        if image.startswith(signature):
+            return content_type
+    if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        return "image/webp"
+    return _DEFAULT_IMAGE_TYPE
+
+
+_REPEAT_COMMANDS = {
+    RepeatMode.OFF: "repeat_off",
+    RepeatMode.ONE: "repeat_one",
+    RepeatMode.ALL: "repeat_all",
 }
 
 
@@ -85,6 +134,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
     _attr_name = None  # the device name is the entity name
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
+    _attr_volume_step = VOLUME_STEP_PERCENT / 100
+
+    # The cover last hashed, as (bytes, hash, content type).
+    _cover: tuple[bytes, str, str] | None = None
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
@@ -106,7 +159,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         # to a unit must not cost the user their volume control.
         if endpoint.connected or endpoint.held_by_unit_host is not None:
             if endpoint.volume is not None:
-                features |= MediaPlayerEntityFeature.VOLUME_SET
+                features |= (
+                    MediaPlayerEntityFeature.VOLUME_SET
+                    | MediaPlayerEntityFeature.VOLUME_STEP
+                )
             if endpoint.muted is not None:
                 features |= MediaPlayerEntityFeature.VOLUME_MUTE
 
@@ -123,11 +179,25 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
         # Transport reflects what the server observing this stream actually
         # advertises. Offering a button that will be silently dropped is worse
-        # than not offering it.
-        for command, feature in _TRANSPORT_FEATURES.items():
-            if command in endpoint.media_commands:
-                features |= feature
+        # than not offering it. It is read again on each state write, so the
+        # buttons follow the stream: an AirPlay stream has four, a Spotify
+        # stream adds repeat and shuffle, and no stream has none.
+        for command in self._stream_commands():
+            features |= _TRANSPORT_FEATURES.get(command, MediaPlayerEntityFeature(0))
         return features
+
+    def _stream_commands(self) -> tuple[str, ...]:
+        """What the selected stream accepts. Empty when no stream is selected.
+
+        A transport command acts on a stream. A speaker at none has no stream,
+        so it has no transport, whatever a link somewhere reports.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.media_link is None:
+            return ()
+        if self.source in (None, SOURCE_NONE):
+            return ()
+        return endpoint.media_commands
 
     @property
     def source_list(self) -> list[str] | None:
@@ -181,10 +251,14 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return None
         if endpoint.source_label is not None:
             return endpoint.source_label
-        if endpoint.held_by_us:
+        if endpoint.held_by_us or endpoint.held_by_plum_unit:
             # We are the holder. Naming ourselves as the source was confusing
             # and put a value in the box that is in no dropdown — Home Assistant
             # holding a speaker on no stream *is* the none state.
+            #
+            # The same is true of a Plum unit. A unit detaches every speaker
+            # when a source dies and keeps the socket, so this is the usual
+            # state after a stream ends. Its name is no stream and no option.
             return SOURCE_NONE
         # Held by another server rather than on one of our streams. Saying so
         # is the honest answer; "None" read as "not routed anywhere".
@@ -274,65 +348,102 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     def state(self) -> MediaPlayerState | None:
         """What this speaker is doing, as far as anything can tell us.
 
+        | State | When |
+        |---|---|
+        | playing | the stream it is on plays |
+        | paused | the stream it is on is paused |
+        | idle | it is on no stream, or the stream stopped |
+        | unavailable | nothing can see the speaker (see `available`) |
+
         Home Assistant originates no audio, so a speaker we hold is idle by
         definition. But a speaker sitting on someone else's stream may well be
         playing, and the mesh tells us whether audio is flowing on it — so say
         so rather than reporting idle over the top of music.
+
+        The state comes from the transport state of the stream, never from the
+        title. A server keeps the last title after a stream stops, and reading
+        the title held this at paused for as long as the link stayed open.
         """
         endpoint = self.endpoint
         if endpoint is None:
             return None
-        if endpoint.media_title is not None:
-            # Home Assistant only surfaces media attributes for a player that
-            # is playing or paused, so a speaker with an observed track must
-            # say so or its title, artist and cover art never reach the UI.
-            return (
-                MediaPlayerState.PLAYING
-                if endpoint.media_playing
-                else MediaPlayerState.PAUSED
-            )
-        if endpoint.source_label is not None:
-            return (
-                MediaPlayerState.PLAYING
-                if endpoint.source_streaming
-                else MediaPlayerState.PAUSED
-                if endpoint.media_title is not None
-                else MediaPlayerState.IDLE
-            )
-        if (
-            endpoint.connected
-            or endpoint.yielded_reason is not None
-            or endpoint.known_to_mesh
-        ):
-            # Present, just not on a stream — or on another server entirely.
+        if self.source in (None, SOURCE_NONE) and endpoint.media_link is None:
             return MediaPlayerState.IDLE
-        return MediaPlayerState.OFF
+        if endpoint.media_state == "paused":
+            # The link is pushed and the mesh is polled, so the link knows of a
+            # pause first. Do not let a stale `streaming` flag play over it.
+            return MediaPlayerState.PAUSED
+        if endpoint.media_state == "playing" or (
+            endpoint.source_label is not None and endpoint.source_streaming
+        ):
+            # The mesh half matters when no link reads the stream, and when a
+            # link reads `stopped` because it was not placed in the group.
+            return MediaPlayerState.PLAYING
+        return MediaPlayerState.IDLE
+
+    @property
+    def _shows_media(self) -> bool:
+        """Whether there is a current track to show.
+
+        False when the stream ended or the source is None. Each media property
+        reads this, so the title, the artist, the album and the cover all go at
+        the same moment and a card does not keep a track that is over.
+        """
+        return self.state in (MediaPlayerState.PLAYING, MediaPlayerState.PAUSED)
 
     @property
     def media_title(self) -> str | None:
         """What is playing on this speaker's stream."""
-        return self.endpoint.media_title if self.endpoint else None
+        return self.endpoint.media_title if self._shows_media else None
 
     @property
     def media_artist(self) -> str | None:
         """Artist of the current track."""
-        return self.endpoint.media_artist if self.endpoint else None
+        return self.endpoint.media_artist if self._shows_media else None
 
     @property
     def media_album_name(self) -> str | None:
         """Album of the current track."""
-        return self.endpoint.media_album if self.endpoint else None
+        return self.endpoint.media_album if self._shows_media else None
+
+    @property
+    def media_album_artist(self) -> str | None:
+        """Album artist of the current track."""
+        return self.endpoint.media_album_artist if self._shows_media else None
+
+    @property
+    def source_kind(self) -> str | None:
+        """What kind of thing feeds this speaker, or None on no stream.
+
+        `airplay`, `bluetooth` or `spotify` for a stream on a Plum-Audio unit,
+        and `server` for another Sendspin server. None also for a unit stream
+        whose source id names no kind we know.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or self.source in (None, SOURCE_NONE):
+            return None
+        if endpoint.source_label is not None:
+            return endpoint.source_kind
+        return KIND_SERVER
+
+    @property
+    def app_name(self) -> str | None:
+        """The name of what feeds this speaker: AirPlay, or a server's name."""
+        kind = self.source_kind
+        if kind == KIND_SERVER:
+            return self.source
+        return _KIND_NAMES.get(kind) if kind is not None else None
 
     @property
     def media_content_type(self) -> MediaType | None:
         """Sendspin carries audio and says nothing finer."""
-        return MediaType.MUSIC if self.endpoint and self.endpoint.media_title else None
+        return MediaType.MUSIC if self._shows_media else None
 
     @property
     def media_duration(self) -> int | None:
         """Track length in seconds, or None for a live stream."""
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_duration is None:
+        if not self._shows_media or endpoint.media_duration is None:
             return None
         return int(endpoint.media_duration)
 
@@ -343,17 +454,27 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         Reported rather than extrapolated: position is never pushed
         periodically, and Home Assistant already advances it from the timestamp
         while the entity is playing.
+
+        Read-only. The protocol has no seek command, so `SEEK` is never offered.
+        None when the sender reports no progress, as some AirPlay senders do.
         """
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_position is None:
+        if not self._shows_media or endpoint.media_position is None:
             return None
         return int(endpoint.media_position)
 
     @property
     def media_position_updated_at(self) -> datetime | None:
-        """When the position was last reported."""
+        """When the position was true, on the server's clock moved to ours.
+
+        None with no position. A time with nothing to extrapolate from is noise.
+        """
         endpoint = self.endpoint
-        if endpoint is None or endpoint.media_position_updated_at is None:
+        if (
+            not self._shows_media
+            or endpoint.media_position is None
+            or endpoint.media_position_updated_at is None
+        ):
             return None
         return dt_util.utc_from_timestamp(endpoint.media_position_updated_at)
 
@@ -366,11 +487,37 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         would be read correctly and then thrown away. Hashing the bytes gives
         it something to key the proxy URL on, and changes when the art does.
         """
+        cover = self._cover_info()
+        return cover[1] if cover is not None else None
+
+    def _cover_info(self) -> tuple[bytes, str, str] | None:
+        """The current cover with its hash and type, worked out once a cover.
+
+        Home Assistant reads the hash on each state write, and a cover is up to
+        half a megabyte. The link keeps one bytes object until the server
+        sends another, so identity says it has not changed. The comparison is
+        for a link that was replaced and holds an equal cover.
+        """
         artwork = self._artwork()
-        return hashlib.sha256(artwork).hexdigest()[:16] if artwork else None
+        if not artwork:
+            return None
+        cached = self._cover
+        if cached is None or (cached[0] is not artwork and cached[0] != artwork):
+            cached = self._cover = (
+                artwork,
+                hashlib.sha256(artwork).hexdigest()[:16],
+                image_content_type(artwork),
+            )
+        return cached
 
     def _artwork(self) -> bytes | None:
-        """Raw cover art from the link observing this speaker's stream."""
+        """Raw cover art from the link observing this speaker's stream.
+
+        None when there is no current track. A link keeps the last cover until
+        the server sends an empty frame, which a stream that ends does not do.
+        """
+        if not self._shows_media:
+            return None
         link = self.coordinator.link_for(
             self.endpoint.media_link if self.endpoint else None
         )
@@ -382,10 +529,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         Plum-Audio publishes no `artwork_url`, so these frames are the only
         cover art that exists.
         """
-        artwork = self._artwork()
-        if not artwork:
+        cover = self._cover_info()
+        if cover is None:
             return None, None
-        return artwork, "image/jpeg"
+        return cover[0], cover[2]
 
     async def async_media_play(self) -> None:
         """Resume the stream this speaker is on."""
@@ -407,6 +554,37 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         """Skip back on the stream this speaker is on."""
         await self._async_transport("previous")
 
+    @property
+    def repeat(self) -> RepeatMode | None:
+        """The repeat mode of the stream, when the stream has one."""
+        endpoint = self.endpoint
+        if endpoint is None or not (
+            self.supported_features & MediaPlayerEntityFeature.REPEAT_SET
+        ):
+            return None
+        try:
+            return RepeatMode(endpoint.media_repeat)
+        except ValueError:
+            return None
+
+    @property
+    def shuffle(self) -> bool | None:
+        """Whether the stream shuffles, when the stream can."""
+        endpoint = self.endpoint
+        if endpoint is None or not (
+            self.supported_features & MediaPlayerEntityFeature.SHUFFLE_SET
+        ):
+            return None
+        return endpoint.media_shuffle
+
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set the repeat mode of the stream this speaker is on."""
+        await self._async_transport(_REPEAT_COMMANDS[repeat])
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Turn shuffle on or off for the stream this speaker is on."""
+        await self._async_transport("shuffle" if shuffle else "unshuffle")
+
     async def _async_transport(self, command: str) -> None:
         """Send a transport command to the server driving this stream.
 
@@ -419,6 +597,12 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             raise HomeAssistantError(
                 "Nothing is observing this stream, so it cannot be controlled"
             )
+        if command not in self._stream_commands():
+            # The server drops a command it did not advertise. Say so, or a
+            # stale card looks as if it worked.
+            raise HomeAssistantError(
+                f"The stream on {endpoint.name} does not accept {command!r}"
+            )
         try:
             await link.async_send_command(command)
         except ConnectionError as err:
@@ -427,6 +611,11 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     @property
     def volume_level(self) -> float | None:
         """0.0-1.0, or None when the speaker has never reported a level.
+
+        This is the **endpoint** level: the gain of this one speaker. It is not
+        the group level of the stream, and it is not the source level on the
+        sending device. Those are separate volumes in Plum-Audio, and this
+        entity reads and writes neither of them.
 
         None must stay None. Substituting a default makes every speaker read
         100% while the audio is demonstrably quieter, which looks exactly like
@@ -454,6 +643,8 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         if endpoint is None:
             return None
         attributes: dict[str, str] = {}
+        if (kind := self.source_kind) is not None:
+            attributes["source_kind"] = kind
         if endpoint.yielded_reason is not None:
             attributes["yielded_to"] = endpoint.yielded_reason
         if endpoint.routed_away:
@@ -467,6 +658,29 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     async def async_set_volume_level(self, volume: float) -> None:
         """Command the speaker's volume, through whoever is holding it."""
         await self._async_command_volume(volume=round(volume * 100))
+
+    async def async_volume_up(self) -> None:
+        """Raise the speaker's volume by one step."""
+        await self._async_step_volume(VOLUME_STEP_PERCENT)
+
+    async def async_volume_down(self) -> None:
+        """Lower the speaker's volume by one step."""
+        await self._async_step_volume(-VOLUME_STEP_PERCENT)
+
+    async def _async_step_volume(self, delta: int) -> None:
+        """Move the endpoint level by `delta` percent, held inside 0-100.
+
+        Whole percent, because that is the unit of the protocol. A float step
+        on `volume_level` drifts, and two presses do not always undo each other.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.volume is None:
+            raise HomeAssistantError(
+                "The volume of this speaker is not known, so it cannot be stepped"
+            )
+        await self._async_command_volume(
+            volume=max(0, min(100, endpoint.volume + delta))
+        )
 
     async def async_mute_volume(self, mute: bool) -> None:
         """Command the speaker's mute state, through whoever is holding it."""
@@ -491,12 +705,16 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             raise HomeAssistantError(
                 f"Nothing is holding {endpoint.name}, so its volume cannot be set"
             )
+        # Always send the pair. A unit before the 2026-11 change refuses a call
+        # that has no `volume`, and reads an absent `muted` as false. So a mute
+        # alone fails there, and a volume alone unmutes. A current unit accepts
+        # either field alone and gets the same result from the pair.
         await self._call_mesh(
             self.coordinator.mesh.async_set_volume(
                 endpoint.held_by_unit_host,
                 endpoint.client_id,
-                volume=volume,
-                muted=muted,
+                volume=volume if volume is not None else endpoint.volume,
+                muted=muted if muted is not None else endpoint.muted,
             )
         )
         await self.coordinator.async_refresh_mesh()

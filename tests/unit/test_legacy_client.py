@@ -558,3 +558,189 @@ def test_a_hunting_link_still_drops_metadata_when_it_moves() -> None:
     client._on_text({"type": "group/update", "payload": {"group_id": "g2"}})
 
     assert client.snapshot.title is None
+
+
+# --- Timeline -----------------------------------------------------------------
+
+
+class _Clocks:
+    """Our monotonic clock, the wall clock, and a server on its own clock."""
+
+    SERVER_AHEAD_US = 5_000_000_000
+
+    def __init__(self, monkeypatch) -> None:
+        self.mono_us = 1_000_000_000
+        self.wall = 1_800_000_000.0
+        monkeypatch.setattr(legacy_client, "_now_us", lambda: self.mono_us)
+        monkeypatch.setattr(legacy_client.time, "time", lambda: self.wall)
+
+    @property
+    def server_us(self) -> int:
+        """What the server's clock reads now."""
+        return self.mono_us + self.SERVER_AHEAD_US
+
+    def advance(self, seconds: float) -> None:
+        """Let time pass on every clock."""
+        self.mono_us += int(seconds * 1_000_000)
+        self.wall += seconds
+
+    def sync(
+        self, client: LegacyControllerClient, *, out_us: int = 0, back_us: int = 0
+    ) -> None:
+        """One `client/time` round trip, with a delay for each direction."""
+        sent = self.mono_us
+        self.mono_us += out_us
+        received = self.server_us
+        self.mono_us += back_us
+        client._on_text(
+            {
+                "type": "server/time",
+                "payload": {
+                    "client_transmitted": sent,
+                    "server_received": received,
+                    "server_transmitted": received,
+                },
+            }
+        )
+
+
+def _progress(position_ms: int, timestamp_us: int | None, *, speed: int = 1000):
+    metadata: dict = {
+        "progress": {
+            "track_progress": position_ms,
+            "track_duration": 240_000,
+            "playback_speed": speed,
+        }
+    }
+    if timestamp_us is not None:
+        metadata["timestamp"] = timestamp_us
+    return {"type": "server/state", "payload": {"metadata": metadata}}
+
+
+def test_position_is_stamped_with_the_server_timestamp(monkeypatch) -> None:
+    """A link that joins mid-track gets a position that is already old.
+
+    The server sends the position it had at `timestamp`, once. A stamp of the
+    receipt time puts the track back to where it was then.
+    """
+    clocks = _Clocks(monkeypatch)
+    client = make_client([])
+    clocks.sync(client)
+
+    # The server took this position 60 seconds before we joined.
+    client._on_text(_progress(10_000, clocks.server_us - 60_000_000))
+
+    progress = client.snapshot.progress
+    assert progress.position_s == 10.0
+    assert progress.updated_at == clocks.wall - 60
+
+
+def test_a_position_that_arrives_before_the_clock_is_stamped_again(
+    monkeypatch,
+) -> None:
+    """The server pushes state on join, before the first `server/time`."""
+    clocks = _Clocks(monkeypatch)
+    updates: list[ControllerSnapshot] = []
+    client = make_client(updates)
+
+    client._on_text(_progress(10_000, clocks.server_us - 60_000_000))
+    # No clock yet, so the receipt time is all there is.
+    assert client.snapshot.progress.updated_at == clocks.wall
+
+    clocks.advance(0.5)
+    clocks.sync(client)
+
+    assert client.snapshot.progress.updated_at == clocks.wall - 60.5
+    assert updates[-1].progress.updated_at == clocks.wall - 60.5
+
+
+def test_a_later_clock_sample_does_not_move_a_good_stamp(monkeypatch) -> None:
+    """A stamp made with the clock stays. Each sync must not write the state."""
+    clocks = _Clocks(monkeypatch)
+    updates: list[ControllerSnapshot] = []
+    client = make_client(updates)
+    clocks.sync(client)
+    client._on_text(_progress(10_000, clocks.server_us))
+    count = len(updates)
+
+    clocks.advance(30)
+    clocks.sync(client, out_us=4_000)
+
+    assert len(updates) == count
+
+
+def test_the_clock_keeps_the_sample_with_the_shortest_round_trip(
+    monkeypatch,
+) -> None:
+    """A slow, lopsided reply carries the most error, so the fastest one wins."""
+    clocks = _Clocks(monkeypatch)
+    client = make_client([])
+
+    clocks.sync(client, out_us=50_000)
+    clocks.sync(client, out_us=400, back_us=400)
+    clocks.sync(client, back_us=80_000)
+
+    assert client._clock_offset_us == _Clocks.SERVER_AHEAD_US
+
+
+def test_a_position_with_no_timestamp_uses_the_receipt_time(monkeypatch) -> None:
+    """Without a timestamp there is nothing to correct with."""
+    clocks = _Clocks(monkeypatch)
+    client = make_client([])
+    clocks.sync(client)
+
+    client._on_text(_progress(10_000, None))
+
+    assert client.snapshot.progress.updated_at == clocks.wall
+
+
+def test_a_timestamp_from_the_future_is_not_trusted(monkeypatch) -> None:
+    """A stamp after now would make Home Assistant run the track backwards."""
+    clocks = _Clocks(monkeypatch)
+    client = make_client([])
+    clocks.sync(client)
+
+    client._on_text(_progress(10_000, clocks.server_us + 5_000_000))
+
+    assert client.snapshot.progress.updated_at == clocks.wall
+
+
+def test_a_sender_that_reports_no_progress_has_no_position() -> None:
+    """Some AirPlay senders send no `prgr`.
+
+    The unit then sends a zero position and a zero duration, with a real
+    speed. That is not the start of a track of no length: it is unknown. The
+    speed still says whether the stream plays.
+    """
+    client = make_client([])
+
+    client._on_text(
+        {
+            "type": "server/state",
+            "payload": {
+                "metadata": {
+                    "progress": {
+                        "track_progress": 0,
+                        "track_duration": 0,
+                        "playback_speed": 1000,
+                    }
+                }
+            },
+        }
+    )
+
+    progress = client.snapshot.progress
+    assert progress.position_s is None
+    assert progress.duration_s is None
+    assert progress.playing is True
+
+
+def test_a_new_connection_does_not_keep_the_old_clock(monkeypatch) -> None:
+    """A server that restarts has a new clock."""
+    clocks = _Clocks(monkeypatch)
+    client = make_client([])
+    clocks.sync(client)
+
+    client._reset_clock()
+
+    assert client._clock_offset_us is None
