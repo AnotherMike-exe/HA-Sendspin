@@ -53,6 +53,10 @@ class EndpointSnapshot:
     on nothing. Derived from the mesh view, which is the only place that
     knows — a Sendspin server tells outsiders nothing about its groups."""
 
+    source_kind: str | None = None
+    """`airplay`, `bluetooth` or `spotify` for a stream on a Plum-Audio unit,
+    when the unit's source id says which. None for no stream."""
+
     source_streaming: bool = False
     """Audio is actually flowing on the assigned stream. We can know this even
     when another server holds the speaker, because it comes from the mesh."""
@@ -87,6 +91,7 @@ class EndpointSnapshot:
     media_title: str | None = None
     media_artist: str | None = None
     media_album: str | None = None
+    media_album_artist: str | None = None
     media_position: float | None = None
     media_position_updated_at: float | None = None
     media_duration: float | None = None

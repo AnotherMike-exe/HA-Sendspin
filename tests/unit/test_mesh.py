@@ -419,3 +419,20 @@ async def test_release_sends_the_url_alone_when_the_id_is_unknown() -> None:
         "source_id": "airplay-1",
         "url": "ws://192.168.7.151:8928/sendspin",
     }
+
+
+def test_the_kind_of_a_source_comes_from_its_id() -> None:
+    """A unit names each input `<kind>-<n>`. Nothing else in the view says it."""
+    kinds = {s.source_id: s.kind for s in parse_view(FIXTURE).sources}
+
+    assert kinds["airplay-1"] == "airplay"
+    assert kinds["bluetooth-1"] == "bluetooth"
+    assert {k for sid, k in kinds.items() if sid.startswith("spotify")} == {"spotify"}
+
+
+def test_an_unknown_kind_of_source_is_not_given_a_name() -> None:
+    """A new input type must read as unknown, not as one of the three."""
+    view = parse_view(_with_source(0, source_id="linein-1"))
+
+    source = next(s for s in view.sources if s.source_id == "linein-1")
+    assert source.kind is None

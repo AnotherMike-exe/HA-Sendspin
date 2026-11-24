@@ -6,6 +6,7 @@ The source dropdown itself is covered in `test_source_selection`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -767,3 +768,115 @@ async def test_a_speaker_another_server_plays_to_stays_available(
     assert state.state == "playing"
     assert state.attributes["held_by"] == "Music Assistant"
     assert state.attributes["source"] == "Music Assistant"
+
+
+# --- Metadata and artwork -----------------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16
+WEBP = b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 8
+GIF = b"GIF89a" + b"\x00" * 16
+
+
+async def test_the_kind_of_source_is_shown(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A card can say AirPlay or Spotify, and a template can branch on it."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(hass, entry, playback_state="playing", **TRACK)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["app_name"] == "AirPlay"
+    assert state.attributes["source_kind"] == "airplay"
+
+
+async def test_a_speaker_at_none_has_no_kind_of_source(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """No stream, so nothing to name."""
+    await setup_with_mesh(hass, fake_server, FIXTURE)
+
+    state = hass.states.get(entity_id(hass))
+
+    assert "app_name" not in state.attributes
+    assert "source_kind" not in state.attributes
+
+
+async def test_the_album_artist_is_shown(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """The link reads it, so the entity gives it."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(
+        hass, entry, playback_state="playing", album_artist="Various", **TRACK
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["media_album_artist"] == "Various"
+
+
+@pytest.mark.parametrize(
+    ("image", "content_type"),
+    [
+        (JPEG, "image/jpeg"),
+        (PNG, "image/png"),
+        (WEBP, "image/webp"),
+        (GIF, "image/gif"),
+        # We ask for JPEG, so that is the guess for bytes nothing recognises.
+        (b"not an image at all", "image/jpeg"),
+    ],
+)
+async def test_the_cover_type_comes_from_the_image_bytes(
+    hass: HomeAssistant,
+    fake_server: FakeSendspinServer,
+    image: bytes,
+    content_type: str,
+) -> None:
+    """A server can send a PNG whatever format the hello asked for."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+    await observe_stream(
+        hass, entry, playback_state="playing", **{**TRACK, "artwork": image}
+    )
+    player = hass.data["media_player"].get_entity(entity_id(hass))
+
+    assert await player.async_get_media_image() == (image, content_type)
+
+
+async def test_the_cover_is_hashed_once_for_each_cover(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A state write must not hash half a megabyte again."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+    coordinator = entry.runtime_data.coordinator
+    player_module = "custom_components.sendspin.media_player.hashlib.sha256"
+
+    with patch(player_module, wraps=hashlib.sha256) as sha256:
+        await observe_stream(hass, entry, playback_state="playing", **TRACK)
+        first = hass.states.get(entity_id(hass)).attributes["entity_picture"]
+        # More state writes for the same cover: a new position, a new title.
+        for position in (1.0, 2.0, 3.0):
+            await observe_stream(
+                hass,
+                entry,
+                playback_state="playing",
+                progress=Progress(
+                    position_s=position,
+                    duration_s=240.0,
+                    playing=True,
+                    updated_at=1.0,
+                ),
+                **TRACK,
+            )
+        coordinator.async_request_publish()
+        await flush(hass)
+        assert sha256.call_count == 1
+
+        await observe_stream(
+            hass, entry, playback_state="playing", **{**TRACK, "artwork": PNG}
+        )
+        second = hass.states.get(entity_id(hass)).attributes["entity_picture"]
+        assert sha256.call_count == 2
+
+    assert first != second

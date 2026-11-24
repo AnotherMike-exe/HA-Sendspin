@@ -46,6 +46,9 @@ REQUEST_TIMEOUT_S = 4.0
 MESH_POLL_INTERVAL_S = 5.0
 
 
+# The kinds of input a Plum-Audio unit has, by the prefix of the source id.
+SOURCE_KINDS = ("airplay", "bluetooth", "spotify")
+
 # Source ids a unit makes for its own use. Never offered, never named.
 _INTERNAL_SOURCE_PREFIXES = ("cal:",)
 
@@ -100,6 +103,16 @@ class MeshSource:
         the live ones: a stream that starts or stops changes no label.
         """
         return f"{self.base_label}{self.label_suffix}"
+
+    @property
+    def kind(self) -> str | None:
+        """`airplay`, `bluetooth` or `spotify`, or None for anything else.
+
+        Read from the id, which a unit builds as `<kind>-<n>`. The view has no
+        field for it. An id that is not one of these is unknown, not guessed.
+        """
+        prefix = self.source_id.partition("-")[0]
+        return prefix if prefix in SOURCE_KINDS else None
 
     @property
     def internal(self) -> bool:

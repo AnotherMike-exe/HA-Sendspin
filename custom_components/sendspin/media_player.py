@@ -53,6 +53,35 @@ _TRANSPORT_FEATURES = {
     "unshuffle": MediaPlayerEntityFeature.SHUFFLE_SET,
 }
 
+# Source kind -> the name a card shows for it.
+_KIND_NAMES = {"airplay": "AirPlay", "bluetooth": "Bluetooth", "spotify": "Spotify"}
+
+# The `source_kind` of a speaker that another Sendspin server plays to.
+KIND_SERVER = "server"
+
+# Leading bytes -> image type. A server can send any of these, whatever format
+# the hello asked for.
+_IMAGE_SIGNATURES = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+# The hello asks for JPEG, so that is the guess for bytes nothing recognises.
+_DEFAULT_IMAGE_TYPE = "image/jpeg"
+
+
+def image_content_type(image: bytes) -> str:
+    """The MIME type of a cover, from the bytes of the cover."""
+    for signature, content_type in _IMAGE_SIGNATURES:
+        if image.startswith(signature):
+            return content_type
+    if image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        return "image/webp"
+    return _DEFAULT_IMAGE_TYPE
+
+
 _REPEAT_COMMANDS = {
     RepeatMode.OFF: "repeat_off",
     RepeatMode.ONE: "repeat_one",
@@ -101,6 +130,9 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     _attr_name = None  # the device name is the entity name
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
     _attr_volume_step = VOLUME_STEP_PERCENT / 100
+
+    # The cover last hashed, as (bytes, hash, content type).
+    _cover: tuple[bytes, str, str] | None = None
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
@@ -370,6 +402,34 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         return self.endpoint.media_album if self._shows_media else None
 
     @property
+    def media_album_artist(self) -> str | None:
+        """Album artist of the current track."""
+        return self.endpoint.media_album_artist if self._shows_media else None
+
+    @property
+    def source_kind(self) -> str | None:
+        """What kind of thing feeds this speaker, or None on no stream.
+
+        `airplay`, `bluetooth` or `spotify` for a stream on a Plum-Audio unit,
+        and `server` for another Sendspin server. None also for a unit stream
+        whose source id names no kind we know.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or self.source in (None, SOURCE_NONE):
+            return None
+        if endpoint.source_label is not None:
+            return endpoint.source_kind
+        return KIND_SERVER
+
+    @property
+    def app_name(self) -> str | None:
+        """The name of what feeds this speaker: AirPlay, or a server's name."""
+        kind = self.source_kind
+        if kind == KIND_SERVER:
+            return self.source
+        return _KIND_NAMES.get(kind) if kind is not None else None
+
+    @property
     def media_content_type(self) -> MediaType | None:
         """Sendspin carries audio and says nothing finer."""
         return MediaType.MUSIC if self._shows_media else None
@@ -422,8 +482,28 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         would be read correctly and then thrown away. Hashing the bytes gives
         it something to key the proxy URL on, and changes when the art does.
         """
+        cover = self._cover_info()
+        return cover[1] if cover is not None else None
+
+    def _cover_info(self) -> tuple[bytes, str, str] | None:
+        """The current cover with its hash and type, worked out once a cover.
+
+        Home Assistant reads the hash on each state write, and a cover is up to
+        half a megabyte. The link keeps one bytes object until the server
+        sends another, so identity says it has not changed. The comparison is
+        for a link that was replaced and holds an equal cover.
+        """
         artwork = self._artwork()
-        return hashlib.sha256(artwork).hexdigest()[:16] if artwork else None
+        if not artwork:
+            return None
+        cached = self._cover
+        if cached is None or (cached[0] is not artwork and cached[0] != artwork):
+            cached = self._cover = (
+                artwork,
+                hashlib.sha256(artwork).hexdigest()[:16],
+                image_content_type(artwork),
+            )
+        return cached
 
     def _artwork(self) -> bytes | None:
         """Raw cover art from the link observing this speaker's stream.
@@ -444,10 +524,10 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         Plum-Audio publishes no `artwork_url`, so these frames are the only
         cover art that exists.
         """
-        artwork = self._artwork()
-        if not artwork:
+        cover = self._cover_info()
+        if cover is None:
             return None, None
-        return artwork, "image/jpeg"
+        return cover[0], cover[2]
 
     async def async_media_play(self) -> None:
         """Resume the stream this speaker is on."""
@@ -558,6 +638,8 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         if endpoint is None:
             return None
         attributes: dict[str, str] = {}
+        if (kind := self.source_kind) is not None:
+            attributes["source_kind"] = kind
         if endpoint.yielded_reason is not None:
             attributes["yielded_to"] = endpoint.yielded_reason
         if endpoint.routed_away:

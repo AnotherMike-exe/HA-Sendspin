@@ -833,6 +833,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 volume=volume,
                 muted=muted,
                 source_label=assigned.label if assigned is not None else None,
+                source_kind=assigned.kind if assigned is not None else None,
                 source_streaming=assigned.streaming if assigned is not None else False,
                 held_by_unit_host=held_by,
                 held_by_us=connected
@@ -853,6 +854,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                 media_title=media.title if media else None,
                 media_artist=media.artist if media else None,
                 media_album=media.album if media else None,
+                media_album_artist=media.album_artist if media else None,
                 media_position=media.progress.position_s
                 if media and media.progress
                 else None,
