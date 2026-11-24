@@ -92,6 +92,9 @@ class EndpointSnapshot:
     media_duration: float | None = None
     media_playing: bool = False
     media_commands: tuple[str, ...] = ()
+    media_repeat: str | None = None
+    """`off`, `one` or `all`, when the stream reports a repeat mode."""
+    media_shuffle: bool | None = None
     media_link: str | None = None
     """Which controller link supplies this endpoint's now-playing, and takes
     its transport commands. None when nothing is observing the stream."""

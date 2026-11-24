@@ -789,12 +789,16 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             if media is None and mesh_player is not None:
                 source_key = self._link_key_for_server(mesh_player.held_by_server_id)
                 media = self._media_for(source_key)
-            if media is None and not connected:
+            if media is None and not connected and mesh_player is None:
                 # Held by something we cannot identify — a third-party speaker
                 # on a non-Plum server is in no mesh view at all. When exactly
                 # one observed server is playing, it is the only candidate;
                 # with two we decline to guess rather than label a speaker with
                 # the wrong track.
+                #
+                # Only for a speaker the mesh does not know. One the mesh does
+                # know is accounted for: a unit holds it, or the mesh names the
+                # server that does, and that server was tried above.
                 source_key = self._sole_playing_link()
                 media = self._media_for(source_key)
 
@@ -845,6 +849,8 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
                     )
                 ),
                 media_commands=media.supported_commands if media else (),
+                media_repeat=media.repeat if media else None,
+                media_shuffle=media.shuffle if media else None,
                 media_link=source_key if media is not None else None,
                 held_by_server=(
                     mesh_player.held_by

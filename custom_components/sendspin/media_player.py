@@ -23,6 +23,7 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    RepeatMode,
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -45,6 +46,17 @@ _TRANSPORT_FEATURES = {
     "stop": MediaPlayerEntityFeature.STOP,
     "next": MediaPlayerEntityFeature.NEXT_TRACK,
     "previous": MediaPlayerEntityFeature.PREVIOUS_TRACK,
+    "repeat_off": MediaPlayerEntityFeature.REPEAT_SET,
+    "repeat_one": MediaPlayerEntityFeature.REPEAT_SET,
+    "repeat_all": MediaPlayerEntityFeature.REPEAT_SET,
+    "shuffle": MediaPlayerEntityFeature.SHUFFLE_SET,
+    "unshuffle": MediaPlayerEntityFeature.SHUFFLE_SET,
+}
+
+_REPEAT_COMMANDS = {
+    RepeatMode.OFF: "repeat_off",
+    RepeatMode.ONE: "repeat_one",
+    RepeatMode.ALL: "repeat_all",
 }
 
 
@@ -130,11 +142,25 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
 
         # Transport reflects what the server observing this stream actually
         # advertises. Offering a button that will be silently dropped is worse
-        # than not offering it.
-        for command, feature in _TRANSPORT_FEATURES.items():
-            if command in endpoint.media_commands:
-                features |= feature
+        # than not offering it. It is read again on each state write, so the
+        # buttons follow the stream: an AirPlay stream has four, a Spotify
+        # stream adds repeat and shuffle, and no stream has none.
+        for command in self._stream_commands():
+            features |= _TRANSPORT_FEATURES.get(command, MediaPlayerEntityFeature(0))
         return features
+
+    def _stream_commands(self) -> tuple[str, ...]:
+        """What the selected stream accepts. Empty when no stream is selected.
+
+        A transport command acts on a stream. A speaker at none has no stream,
+        so it has no transport, whatever a link somewhere reports.
+        """
+        endpoint = self.endpoint
+        if endpoint is None or endpoint.media_link is None:
+            return ()
+        if self.source in (None, SOURCE_NONE):
+            return ()
+        return endpoint.media_commands
 
     @property
     def source_list(self) -> list[str] | None:
@@ -418,6 +444,37 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         """Skip back on the stream this speaker is on."""
         await self._async_transport("previous")
 
+    @property
+    def repeat(self) -> RepeatMode | None:
+        """The repeat mode of the stream, when the stream has one."""
+        endpoint = self.endpoint
+        if endpoint is None or not (
+            self.supported_features & MediaPlayerEntityFeature.REPEAT_SET
+        ):
+            return None
+        try:
+            return RepeatMode(endpoint.media_repeat)
+        except ValueError:
+            return None
+
+    @property
+    def shuffle(self) -> bool | None:
+        """Whether the stream shuffles, when the stream can."""
+        endpoint = self.endpoint
+        if endpoint is None or not (
+            self.supported_features & MediaPlayerEntityFeature.SHUFFLE_SET
+        ):
+            return None
+        return endpoint.media_shuffle
+
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set the repeat mode of the stream this speaker is on."""
+        await self._async_transport(_REPEAT_COMMANDS[repeat])
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Turn shuffle on or off for the stream this speaker is on."""
+        await self._async_transport("shuffle" if shuffle else "unshuffle")
+
     async def _async_transport(self, command: str) -> None:
         """Send a transport command to the server driving this stream.
 
@@ -429,6 +486,12 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         if link is None:
             raise HomeAssistantError(
                 "Nothing is observing this stream, so it cannot be controlled"
+            )
+        if command not in self._stream_commands():
+            # The server drops a command it did not advertise. Say so, or a
+            # stale card looks as if it worked.
+            raise HomeAssistantError(
+                f"The stream on {endpoint.name} does not accept {command!r}"
             )
         try:
             await link.async_send_command(command)

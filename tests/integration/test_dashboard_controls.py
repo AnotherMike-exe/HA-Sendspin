@@ -13,9 +13,11 @@ from aiosendspin.server.server import ClientConnectedEvent, ClientDisconnectedEv
 from homeassistant.components.media_player import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.sendspin.const import SOURCE_NONE
+from custom_components.sendspin.legacy_client import ControllerSnapshot
 from custom_components.sendspin.mesh import parse_view
 from tests.fakes.fake_sendspin import FakeSendspinServer
 from tests.integration.test_source_selection import (
@@ -24,6 +26,7 @@ from tests.integration.test_source_selection import (
     PLAYER_URL,
     entity_id,
     flush,
+    repoll,
     setup_with_mesh,
 )
 
@@ -320,3 +323,201 @@ async def test_a_speaker_a_unit_holds_on_no_stream_is_at_none(
     assert state.attributes["source"] == SOURCE_NONE
     assert state.attributes["source_list"] == [SOURCE_NONE]
     assert state.attributes["held_by"] == "Plum Amp100"
+
+
+# --- Transport ----------------------------------------------------------------
+
+AIRPLAY_KEY = "unit-7204:airplay-1"
+PLUM_COMMANDS = ("play", "pause", "next", "previous")
+SPOTIFY_COMMANDS = (
+    *PLUM_COMMANDS,
+    "repeat_off",
+    "repeat_one",
+    "repeat_all",
+    "shuffle",
+    "unshuffle",
+)
+TRANSPORT = (
+    MediaPlayerEntityFeature.PLAY
+    | MediaPlayerEntityFeature.PAUSE
+    | MediaPlayerEntityFeature.STOP
+    | MediaPlayerEntityFeature.NEXT_TRACK
+    | MediaPlayerEntityFeature.PREVIOUS_TRACK
+    | MediaPlayerEntityFeature.REPEAT_SET
+    | MediaPlayerEntityFeature.SHUFFLE_SET
+)
+
+
+async def observe_stream(hass: HomeAssistant, entry, **fields) -> AsyncMock:
+    """Give the link that reads the speaker's stream a state.
+
+    Returns the mock that receives the commands the entity sends.
+    """
+    coordinator = entry.runtime_data.coordinator
+    link = coordinator.links[AIRPLAY_KEY]
+    link.snapshot = ControllerSnapshot(connected=True, **fields)
+    link.async_send_command = AsyncMock()
+    coordinator.async_request_publish()
+    await flush(hass)
+    return link.async_send_command
+
+
+def features(hass: HomeAssistant) -> MediaPlayerEntityFeature:
+    """The entity's current feature set."""
+    return MediaPlayerEntityFeature(
+        hass.states.get(entity_id(hass)).attributes["supported_features"]
+    )
+
+
+async def test_transport_follows_what_the_stream_advertises(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """An AirPlay stream has four commands, so the entity has four buttons."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(
+        hass, entry, playback_state="playing", supported_commands=PLUM_COMMANDS
+    )
+
+    assert features(hass) & TRANSPORT == (
+        MediaPlayerEntityFeature.PLAY
+        | MediaPlayerEntityFeature.PAUSE
+        | MediaPlayerEntityFeature.NEXT_TRACK
+        | MediaPlayerEntityFeature.PREVIOUS_TRACK
+    )
+
+
+async def test_stop_is_offered_only_when_the_server_advertises_it(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """Plum-Audio has no stop. Another server can have one."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(
+        hass, entry, playback_state="playing", supported_commands=("play", "stop")
+    )
+
+    assert features(hass) & TRANSPORT == (
+        MediaPlayerEntityFeature.PLAY | MediaPlayerEntityFeature.STOP
+    )
+
+
+async def test_repeat_and_shuffle_show_for_a_stream_that_has_them(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A Spotify stream advertises repeat and shuffle, with their state."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    sent = await observe_stream(
+        hass,
+        entry,
+        playback_state="playing",
+        supported_commands=SPOTIFY_COMMANDS,
+        repeat="all",
+        shuffle=True,
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert features(hass) & MediaPlayerEntityFeature.REPEAT_SET
+    assert features(hass) & MediaPlayerEntityFeature.SHUFFLE_SET
+    assert state.attributes["repeat"] == "all"
+    assert state.attributes["shuffle"] is True
+
+    await call(hass, "repeat_set", held_by_unit(), repeat="one")
+    await call(hass, "shuffle_set", held_by_unit(), shuffle=False)
+    await call(hass, "media_next_track", held_by_unit())
+
+    assert [c.args[0] for c in sent.await_args_list] == [
+        "repeat_one",
+        "unshuffle",
+        "next",
+    ]
+
+
+async def test_repeat_and_shuffle_are_absent_for_airplay(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """No command, so no control and no attribute."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+
+    await observe_stream(
+        hass, entry, playback_state="playing", supported_commands=PLUM_COMMANDS
+    )
+
+    state = hass.states.get(entity_id(hass))
+    assert not features(hass) & (
+        MediaPlayerEntityFeature.REPEAT_SET | MediaPlayerEntityFeature.SHUFFLE_SET
+    )
+    assert "repeat" not in state.attributes
+    assert "shuffle" not in state.attributes
+
+
+async def test_transport_goes_when_the_speaker_leaves_the_stream(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """With no stream selected there is nothing for a button to act on."""
+    payload = held_by_unit()
+    entry = await hand_to_unit(hass, fake_server, payload)
+    await observe_stream(
+        hass, entry, playback_state="playing", supported_commands=SPOTIFY_COMMANDS
+    )
+    assert features(hass) & TRANSPORT
+
+    gone = json.loads(json.dumps(payload))
+    gone["units"][0]["sources"][0]["player_ids"] = []
+    await repoll(hass, entry, gone)
+
+    assert hass.states.get(entity_id(hass)).attributes["source"] == SOURCE_NONE
+    assert not features(hass) & TRANSPORT
+
+
+async def test_a_unit_held_speaker_does_not_borrow_another_servers_stream(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """One playing server is the only candidate only for a speaker nobody names.
+
+    A speaker a Plum unit holds on no stream is accounted for. It must not take
+    the track, or the buttons, of a server that happens to play alone.
+    """
+    payload = held_by_unit()
+    payload["units"][0]["sources"][0]["player_ids"] = []
+    entry = await hand_to_unit(hass, fake_server, payload)
+
+    with patch(
+        "custom_components.sendspin.mesh.MeshClient.async_fetch_view",
+        return_value=parse_view(payload),
+    ):
+        coordinator = entry.runtime_data.coordinator
+        coordinator.async_note_mesh_host("192.168.7.226")
+        await coordinator.async_refresh_mesh()
+    coordinator.links["server:192.168.7.226"].snapshot = ControllerSnapshot(
+        connected=True,
+        server_id="ma",
+        server_name="Music Assistant",
+        playback_state="playing",
+        title="I Remember",
+        supported_commands=PLUM_COMMANDS,
+    )
+    coordinator.async_request_publish()
+    await flush(hass)
+
+    state = hass.states.get(entity_id(hass))
+    assert state.attributes["source"] == SOURCE_NONE
+    assert state.attributes.get("media_title") is None
+    assert not features(hass) & TRANSPORT
+
+
+async def test_a_command_the_stream_does_not_have_fails_clearly(
+    hass: HomeAssistant, fake_server: FakeSendspinServer
+) -> None:
+    """A stale card can still call a service the stream no longer has."""
+    entry = await hand_to_unit(hass, fake_server, held_by_unit())
+    sent = await observe_stream(
+        hass, entry, playback_state="playing", supported_commands=("play",)
+    )
+    player = hass.data["media_player"].get_entity(entity_id(hass))
+
+    with pytest.raises(HomeAssistantError):
+        await player.async_media_next_track()
+
+    sent.assert_not_awaited()
