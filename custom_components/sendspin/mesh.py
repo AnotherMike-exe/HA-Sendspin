@@ -455,6 +455,27 @@ class MeshClient:
             body["muted"] = muted
         await self._post(unit_host, "volume", body)
 
+    async def async_set_source_volume(
+        self,
+        source: MeshSource,
+        *,
+        volume: int | None = None,
+        muted: bool | None = None,
+    ) -> None:
+        """Command the **source** level: the volume on the sending device.
+
+        The phone's AirPlay slider, Spotify Connect's device volume. It stacks
+        with each endpoint's own level and is not the group level. Posted to the
+        unit that owns the source, because `source_id` is only unique per unit.
+        The API takes either field alone, so only what changed is sent.
+        """
+        body: dict[str, Any] = {"source_id": source.source_id}
+        if volume is not None:
+            body["volume"] = volume
+        if muted is not None:
+            body["muted"] = muted
+        await self._post(source.unit_host, "source-volume", body)
+
     async def _post(self, host: str, path: str, body: dict[str, Any]) -> None:
         """POST to a unit, raising something a service can surface."""
         try:

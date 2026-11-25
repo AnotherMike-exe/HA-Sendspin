@@ -10,6 +10,24 @@ Versions before 0.4.0 are described in the
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-24
+
+Streams are entities, so a dashboard can show one card for each stream.
+
+**Upgrade notes**
+
+- New `media_player` entities appear, one for each input of each Plum-Audio unit, under a
+  device for the unit. Speaker entities do not change.
+
+### Added
+- A stream entity for each mesh source: now-playing, cover art, progress and transport for
+  the stream, and the `endpoints` and `speakers` attributes that list who is on it.
+- Source volume and mute on the stream entity, through `POST /api/mesh/source-volume`, where
+  the source accepts one.
+- The stream entity's source dropdown moves every adopted speaker on the stream together.
+- A controller link for every live stream, so a stream with no adopted speaker still shows
+  what plays.
+
 ## [0.4.0] - 2026-11-24
 
 The media controls are complete enough for a dashboard media card.
@@ -41,5 +59,6 @@ The media controls are complete enough for a dashboard media card.
 - The cover type comes from the image bytes, so a PNG cover shows.
 - `pillow` is no longer in the manifest requirements, so hassfest passes.
 
-[Unreleased]: https://github.com/AnotherMike-exe/HA-Sendspin/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AnotherMike-exe/HA-Sendspin/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/AnotherMike-exe/HA-Sendspin/releases/tag/v0.5.0
 [0.4.0]: https://github.com/AnotherMike-exe/HA-Sendspin/releases/tag/v0.4.0

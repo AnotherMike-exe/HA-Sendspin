@@ -31,6 +31,11 @@ slice, on its own.
   advertises every input it has configured, so inputs with nothing connected to
   them are filtered out: the dropdown holds what you can really route to, which
   is sometimes just "None".
+- 🎚️ **A media player for each stream.** Every input a Plum-Audio unit has
+  configured gets one: what plays, cover art and transport for the stream; the
+  volume is the **source** level on the sending device; and its source dropdown
+  moves every speaker on the stream at once. The `endpoints` attribute lists
+  the speakers on it. See [docs/DASHBOARD.md](docs/DASHBOARD.md#stream-entities).
 - 📶 **Presence as availability**, so automations can trigger on a speaker
   dropping off the mesh with no polling script.
 - 🎵 **Now-playing, cover art and transport** — title, artist, album, a

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+from weakref import WeakKeyDictionary
 
 from homeassistant.components.media_player import (
     MediaPlayerDeviceClass,
@@ -32,13 +33,18 @@ from homeassistant.components.media_player import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import SendspinConfigEntry
-from .const import CONF_LISTENER_URL, SOURCE_NONE, SUBENTRY_TYPE_PLAYER
+from .const import CONF_LISTENER_URL, DOMAIN, SOURCE_NONE, SUBENTRY_TYPE_PLAYER
+from .coordinator import SendspinCoordinator
 from .entity import SendspinEndpointEntity
 from .mesh import MeshError
+from .models import StreamSnapshot
 from .server_host import player_role
 
 # One press of volume up or down, in percent of the endpoint level.
@@ -60,6 +66,13 @@ _TRANSPORT_FEATURES = {
 
 # Source kind -> the name a card shows for it.
 _KIND_NAMES = {"airplay": "AirPlay", "bluetooth": "Bluetooth", "spotify": "Spotify"}
+
+# Source kind -> the icon of its stream entity.
+_KIND_ICONS = {
+    "airplay": "mdi:cast-audio-variant",
+    "bluetooth": "mdi:bluetooth-audio",
+    "spotify": "mdi:spotify",
+}
 
 # The `source_kind` of a speaker that another Sendspin server plays to.
 KIND_SERVER = "server"
@@ -87,6 +100,32 @@ def image_content_type(image: bytes) -> str:
     return _DEFAULT_IMAGE_TYPE
 
 
+# Link -> its cover as (bytes, hash, content type). Shared by every entity
+# that shows a link's cover, so one cover is hashed once, not once per entity.
+_COVERS: WeakKeyDictionary[object, tuple[bytes, str, str]] = WeakKeyDictionary()
+
+
+def cover_for(link: object | None) -> tuple[bytes, str, str] | None:
+    """A link's current cover with its hash and type, worked out once a cover.
+
+    Home Assistant reads the hash on each state write, and a cover is up to
+    half a megabyte. The link keeps one bytes object until the server sends
+    another, so identity says it has not changed. The comparison is for a link
+    that was replaced and holds an equal cover.
+    """
+    artwork = link.snapshot.artwork if link is not None else None
+    if not artwork:
+        return None
+    cached = _COVERS.get(link)
+    if cached is None or (cached[0] is not artwork and cached[0] != artwork):
+        cached = _COVERS[link] = (
+            artwork,
+            hashlib.sha256(artwork).hexdigest()[:16],
+            image_content_type(artwork),
+        )
+    return cached
+
+
 _REPEAT_COMMANDS = {
     RepeatMode.OFF: "repeat_off",
     RepeatMode.ONE: "repeat_one",
@@ -110,6 +149,20 @@ async def async_setup_entry(
     """
     coordinator = entry.runtime_data.coordinator
     known: set[str] = set()
+    known_streams: set[str] = set()
+
+    @callback
+    def _add_new_streams() -> None:
+        """One entity per configured mesh source, added as sources appear.
+
+        Never removed: a source that leaves the view goes unavailable, so its
+        renames and dashboard cards survive a unit restarting.
+        """
+        new = [key for key in coordinator.data.streams if key not in known_streams]
+        if not new:
+            return
+        known_streams.update(new)
+        async_add_entities([SendspinStreamMediaPlayer(coordinator, key) for key in new])
 
     @callback
     def _add_new_endpoints() -> None:
@@ -126,7 +179,9 @@ async def async_setup_entry(
             )
 
     _add_new_endpoints()
+    _add_new_streams()
     entry.async_on_unload(coordinator.async_add_listener(_add_new_endpoints))
+    entry.async_on_unload(coordinator.async_add_listener(_add_new_streams))
 
 
 class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
@@ -135,9 +190,6 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
     _attr_name = None  # the device name is the entity name
     _attr_device_class = MediaPlayerDeviceClass.SPEAKER
     _attr_volume_step = VOLUME_STEP_PERCENT / 100
-
-    # The cover last hashed, as (bytes, hash, content type).
-    _cover: tuple[bytes, str, str] | None = None
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
@@ -491,37 +543,18 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
         return cover[1] if cover is not None else None
 
     def _cover_info(self) -> tuple[bytes, str, str] | None:
-        """The current cover with its hash and type, worked out once a cover.
+        """The current cover of this speaker's stream, or None with no track.
 
-        Home Assistant reads the hash on each state write, and a cover is up to
-        half a megabyte. The link keeps one bytes object until the server
-        sends another, so identity says it has not changed. The comparison is
-        for a link that was replaced and holds an equal cover.
-        """
-        artwork = self._artwork()
-        if not artwork:
-            return None
-        cached = self._cover
-        if cached is None or (cached[0] is not artwork and cached[0] != artwork):
-            cached = self._cover = (
-                artwork,
-                hashlib.sha256(artwork).hexdigest()[:16],
-                image_content_type(artwork),
-            )
-        return cached
-
-    def _artwork(self) -> bytes | None:
-        """Raw cover art from the link observing this speaker's stream.
-
-        None when there is no current track. A link keeps the last cover until
-        the server sends an empty frame, which a stream that ends does not do.
+        A link keeps the last cover until the server sends an empty frame,
+        which a stream that ends does not do.
         """
         if not self._shows_media:
             return None
-        link = self.coordinator.link_for(
-            self.endpoint.media_link if self.endpoint else None
+        return cover_for(
+            self.coordinator.link_for(
+                self.endpoint.media_link if self.endpoint else None
+            )
         )
-        return link.snapshot.artwork if link is not None else None
 
     async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
         """Cover art, pushed as binary frames by the artwork role.
@@ -726,3 +759,394 @@ class SendspinEndpointMediaPlayer(SendspinEndpointEntity, MediaPlayerEntity):
             return None
         client = self.coordinator.host.server.get_client(endpoint.client_id)
         return player_role(client) if client is not None else None
+
+
+class SendspinStreamMediaPlayer(
+    CoordinatorEntity[SendspinCoordinator], MediaPlayerEntity
+):
+    """A mesh source — a stream — exposed as a media player.
+
+    The counterpart of an endpoint: what plays, where it plays and how loud
+    the sender is, for everything on the stream at once.
+
+    | Control | Acts on |
+    |---|---|
+    | play, pause, next, previous, repeat, shuffle | the stream |
+    | volume and mute | the **source** level, on the sending device |
+    | source dropdown | every adopted speaker on the stream, moved together |
+
+    No `GROUPING`: a stream's speakers are the speakers whose own source is
+    this stream, listed in the `endpoints` attribute. Joining a stream is still
+    an endpoint's `select_source`, and nothing else.
+    """
+
+    # Named by its dropdown label, so a stream reads the same everywhere.
+    _attr_has_entity_name = False
+    _attr_device_class = MediaPlayerDeviceClass.RECEIVER
+    _attr_volume_step = VOLUME_STEP_PERCENT / 100
+
+    def __init__(self, coordinator: SendspinCoordinator, key: str) -> None:
+        """Bind the entity to a source key, which is unique on the mesh."""
+        super().__init__(coordinator)
+        self._key = key
+        stream = coordinator.data.streams[key]
+        self._attr_unique_id = f"source:{key}"
+        self._attr_name = stream.label
+        self._attr_icon = _KIND_ICONS.get(stream.kind, "mdi:waveform")
+        # One device per unit, so a unit's streams sit together and take the
+        # unit's area. The unit id is its identity, never its host.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"unit:{stream.unit_id}")},
+            name=stream.unit_name,
+            manufacturer="Plum Solutions",
+            model="Plum-Audio unit",
+            configuration_url=f"http://{stream.unit_host}:5001/"
+            if stream.unit_host
+            else None,
+        )
+
+    @property
+    def stream(self) -> StreamSnapshot | None:
+        """This stream's latest snapshot, if the mesh still lists it."""
+        return self.coordinator.data.streams.get(self._key)
+
+    @property
+    def available(self) -> bool:
+        """Present in the mesh view. A stream with no sender is `off`, not gone."""
+        return super().available and self.stream is not None
+
+    @property
+    def state(self) -> MediaPlayerState | None:
+        """`off` with no sender, else what the stream's transport says.
+
+        The same reading as an endpoint's, so a stream and the speakers on it
+        show the same state at the same moment.
+        """
+        stream = self.stream
+        if stream is None:
+            return None
+        if not stream.live:
+            return MediaPlayerState.OFF
+        if stream.media_state == "paused":
+            return MediaPlayerState.PAUSED
+        if stream.media_state == "playing" or stream.streaming:
+            return MediaPlayerState.PLAYING
+        return MediaPlayerState.IDLE
+
+    @property
+    def supported_features(self) -> MediaPlayerEntityFeature:
+        """Transport the stream advertises, and the source level when it exists.
+
+        Volume only when the source both accepts one and has reported a level:
+        a slider that cannot show where it is would read 100% over quieter
+        audio. Bluetooth senders accept none.
+        """
+        stream = self.stream
+        if stream is None:
+            return MediaPlayerEntityFeature(0)
+        features = MediaPlayerEntityFeature(0)
+        if stream.supports_source_volume and stream.live:
+            if stream.source_volume is not None:
+                features |= (
+                    MediaPlayerEntityFeature.VOLUME_SET
+                    | MediaPlayerEntityFeature.VOLUME_STEP
+                )
+            if stream.source_muted is not None:
+                features |= MediaPlayerEntityFeature.VOLUME_MUTE
+        if self.source_list is not None:
+            features |= MediaPlayerEntityFeature.SELECT_SOURCE
+        for command in self._stream_commands():
+            features |= _TRANSPORT_FEATURES.get(command, MediaPlayerEntityFeature(0))
+        return features
+
+    def _stream_commands(self) -> tuple[str, ...]:
+        """What the stream accepts now. Nothing with no sender."""
+        stream = self.stream
+        if stream is None or stream.media_link is None or not stream.live:
+            return ()
+        return stream.media_commands
+
+    @property
+    def _shows_media(self) -> bool:
+        return self.state in (MediaPlayerState.PLAYING, MediaPlayerState.PAUSED)
+
+    @property
+    def media_title(self) -> str | None:
+        """What plays on the stream."""
+        return self.stream.media_title if self._shows_media else None
+
+    @property
+    def media_artist(self) -> str | None:
+        """Artist of the current track."""
+        return self.stream.media_artist if self._shows_media else None
+
+    @property
+    def media_album_name(self) -> str | None:
+        """Album of the current track."""
+        return self.stream.media_album if self._shows_media else None
+
+    @property
+    def media_album_artist(self) -> str | None:
+        """Album artist of the current track."""
+        return self.stream.media_album_artist if self._shows_media else None
+
+    @property
+    def media_content_type(self) -> MediaType | None:
+        """Sendspin carries audio and says nothing finer."""
+        return MediaType.MUSIC if self._shows_media else None
+
+    @property
+    def app_name(self) -> str | None:
+        """AirPlay, Bluetooth or Spotify."""
+        stream = self.stream
+        return _KIND_NAMES.get(stream.kind) if stream and stream.kind else None
+
+    @property
+    def media_duration(self) -> int | None:
+        """Track length in seconds, or None for a live stream."""
+        stream = self.stream
+        if not self._shows_media or stream.media_duration is None:
+            return None
+        return int(stream.media_duration)
+
+    @property
+    def media_position(self) -> int | None:
+        """Position in seconds, as of `media_position_updated_at`. Read-only."""
+        stream = self.stream
+        if not self._shows_media or stream.media_position is None:
+            return None
+        return int(stream.media_position)
+
+    @property
+    def media_position_updated_at(self) -> datetime | None:
+        """When the position was true. None with no position."""
+        stream = self.stream
+        if (
+            not self._shows_media
+            or stream.media_position is None
+            or stream.media_position_updated_at is None
+        ):
+            return None
+        return dt_util.utc_from_timestamp(stream.media_position_updated_at)
+
+    @property
+    def media_image_hash(self) -> str | None:
+        """Hash of the cover bytes, so Home Assistant publishes a picture."""
+        cover = self._cover_info()
+        return cover[1] if cover is not None else None
+
+    def _cover_info(self) -> tuple[bytes, str, str] | None:
+        """The current cover of the stream, or None with no track."""
+        if not self._shows_media:
+            return None
+        return cover_for(self.coordinator.link_for(self.stream.media_link))
+
+    async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
+        """Cover art, from the link reading this stream."""
+        cover = self._cover_info()
+        if cover is None:
+            return None, None
+        return cover[0], cover[2]
+
+    async def async_media_play(self) -> None:
+        """Resume the stream."""
+        await self._async_transport("play")
+
+    async def async_media_pause(self) -> None:
+        """Pause the stream."""
+        await self._async_transport("pause")
+
+    async def async_media_stop(self) -> None:
+        """Stop the stream."""
+        await self._async_transport("stop")
+
+    async def async_media_next_track(self) -> None:
+        """Skip forward on the stream."""
+        await self._async_transport("next")
+
+    async def async_media_previous_track(self) -> None:
+        """Skip back on the stream."""
+        await self._async_transport("previous")
+
+    @property
+    def repeat(self) -> RepeatMode | None:
+        """The repeat mode, when the stream has one."""
+        stream = self.stream
+        if stream is None or not (
+            self.supported_features & MediaPlayerEntityFeature.REPEAT_SET
+        ):
+            return None
+        try:
+            return RepeatMode(stream.media_repeat)
+        except ValueError:
+            return None
+
+    @property
+    def shuffle(self) -> bool | None:
+        """Whether the stream shuffles, when it can."""
+        stream = self.stream
+        if stream is None or not (
+            self.supported_features & MediaPlayerEntityFeature.SHUFFLE_SET
+        ):
+            return None
+        return stream.media_shuffle
+
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set the repeat mode of the stream."""
+        await self._async_transport(_REPEAT_COMMANDS[repeat])
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Turn shuffle on or off."""
+        await self._async_transport("shuffle" if shuffle else "unshuffle")
+
+    async def _async_transport(self, command: str) -> None:
+        """Send a transport command over the link reading this stream."""
+        stream = self.stream
+        link = self.coordinator.link_for(stream.media_link if stream else None)
+        if link is None:
+            raise HomeAssistantError(
+                "Nothing is observing this stream, so it cannot be controlled"
+            )
+        if command not in self._stream_commands():
+            raise HomeAssistantError(f"This stream does not accept {command!r}")
+        try:
+            await link.async_send_command(command)
+        except ConnectionError as err:
+            raise HomeAssistantError(str(err)) from err
+
+    @property
+    def volume_level(self) -> float | None:
+        """The **source** level, 0.0-1.0. Not any speaker's, and not the group's."""
+        stream = self.stream
+        if stream is None or stream.source_volume is None:
+            return None
+        return stream.source_volume / 100
+
+    @property
+    def is_volume_muted(self) -> bool | None:
+        """Mute at the source, or None when the source reports none."""
+        stream = self.stream
+        return stream.source_muted if stream is not None else None
+
+    async def async_set_volume_level(self, volume: float) -> None:
+        """Set the level on the sending device."""
+        await self._async_source_volume(volume=round(volume * 100))
+
+    async def async_volume_up(self) -> None:
+        """Raise the source level by one step."""
+        await self._async_step_volume(VOLUME_STEP_PERCENT)
+
+    async def async_volume_down(self) -> None:
+        """Lower the source level by one step."""
+        await self._async_step_volume(-VOLUME_STEP_PERCENT)
+
+    async def _async_step_volume(self, delta: int) -> None:
+        stream = self.stream
+        if stream is None or stream.source_volume is None:
+            raise HomeAssistantError(
+                "The volume of this stream is not known, so it cannot be stepped"
+            )
+        await self._async_source_volume(
+            volume=max(0, min(100, stream.source_volume + delta))
+        )
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        """Mute or unmute at the source."""
+        await self._async_source_volume(muted=mute)
+
+    async def _async_source_volume(
+        self, *, volume: int | None = None, muted: bool | None = None
+    ) -> None:
+        source = self._mesh_source()
+        if source is None or not source.supports_source_volume:
+            raise HomeAssistantError("This stream has no source volume")
+        try:
+            await self.coordinator.mesh.async_set_source_volume(
+                source, volume=volume, muted=muted
+            )
+        except MeshError as err:
+            raise HomeAssistantError(str(err)) from err
+        await self.coordinator.async_refresh_mesh()
+
+    def _mesh_source(self):
+        return next(
+            (s for s in self.coordinator.mesh_view.sources if s.key == self._key),
+            None,
+        )
+
+    @property
+    def source_list(self) -> list[str] | None:
+        """Where the speakers on this stream can be moved, all at once.
+
+        The same options an endpoint's dropdown offers. Empty of choices — no
+        dropdown — while no adopted speaker is on the stream, since there is
+        then nothing to move.
+        """
+        stream = self.stream
+        if stream is None or not stream.members:
+            return None
+        data = self.coordinator.data
+        options = [
+            SOURCE_NONE,
+            *(name for _server_id, name in data.servers),
+            *(source.label for source in data.live_sources),
+        ]
+        if stream.label not in options:
+            options.append(stream.label)
+        return options
+
+    @property
+    def source(self) -> str | None:
+        """This stream, which is where its speakers are."""
+        stream = self.stream
+        return stream.label if stream is not None and stream.members else None
+
+    async def async_select_source(self, source: str) -> None:
+        """Move every adopted speaker on this stream to `source`.
+
+        Each speaker is moved by its own `select_source`, so a group move is
+        exactly the sum of single moves and cannot route differently from one.
+        """
+        stream = self.stream
+        if stream is None or source == stream.label:
+            return
+        targets = self._member_entity_ids()
+        if not targets:
+            raise HomeAssistantError("No speaker is on this stream")
+        await self.hass.services.async_call(
+            "media_player",
+            "select_source",
+            {"entity_id": targets, "source": source},
+            blocking=True,
+        )
+
+    def _member_entity_ids(self) -> list[str]:
+        """Entity ids of the adopted speakers on this stream, in name order."""
+        stream = self.stream
+        if stream is None:
+            return []
+        registry = er.async_get(self.hass)
+        ids = (
+            registry.async_get_entity_id("media_player", DOMAIN, f"player:{url}")
+            for url in stream.members
+        )
+        return [entity_id for entity_id in ids if entity_id is not None]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object] | None:
+        """Who is on the stream, for dashboards and automations.
+
+        `endpoints` is the entity ids of the adopted speakers on it. `speakers`
+        is every speaker the mesh shows on it, by name, adopted or not.
+        """
+        stream = self.stream
+        if stream is None:
+            return None
+        attributes: dict[str, object] = {
+            "endpoints": self._member_entity_ids(),
+            "speakers": list(stream.speaker_names),
+            "source_label": stream.label,
+        }
+        if stream.kind is not None:
+            attributes["source_kind"] = stream.kind
+        return attributes

@@ -43,7 +43,7 @@ from .const import DEFAULT_SERVER_PORT as SENDSPIN_SERVER_PORT
 from .const import DEFAULT_WEBSOCKET_PATH, DOMAIN
 from .legacy_client import ControllerSnapshot, LegacyControllerClient
 from .mesh import MESH_POLL_INTERVAL_S, MeshClient, MeshView
-from .models import EndpointSnapshot, SendspinData
+from .models import EndpointSnapshot, SendspinData, StreamSnapshot
 from .server_host import ServerHost, player_role
 
 if TYPE_CHECKING:
@@ -225,6 +225,13 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             # now-playing, and the source lives for a few seconds.
             if source is not None and source.unit_host and not source.internal:
                 wanted[source.key] = source.unit_host
+
+        # And one for every live stream, so its stream entity can show what
+        # plays and take transport even when no speaker of ours is on it. Only
+        # live ones: a configured input with no sender has nothing to read.
+        for source in self._mesh_view.live_sources:
+            if source.unit_host:
+                wanted.setdefault(source.key, source.unit_host)
 
         for key in list(self._links):
             if key not in wanted:
@@ -928,6 +935,7 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
 
         return SendspinData(
             endpoints=endpoints,
+            streams=self._build_streams(endpoints),
             sources=self._mesh_view.sources,
             live_sources=(
                 ()
@@ -936,6 +944,69 @@ class SendspinCoordinator(DataUpdateCoordinator[SendspinData]):
             ),
             servers=self._foreign_servers(),
         )
+
+    def _build_streams(
+        self, endpoints: dict[str, EndpointSnapshot]
+    ) -> dict[str, StreamSnapshot]:
+        """One snapshot per routable mesh source.
+
+        Members are read from the endpoint snapshots just built, so a stream
+        and its speakers can never disagree about who is on it. Liveness
+        expires with the mesh view, exactly as the dropdown's does.
+        """
+        expired = self._mesh_liveness_expired()
+        live_keys = set() if expired else {s.key for s in self._mesh_view.live_sources}
+        members_by_label: dict[str, list[EndpointSnapshot]] = {}
+        for endpoint in endpoints.values():
+            if endpoint.source_label is not None:
+                members_by_label.setdefault(endpoint.source_label, []).append(endpoint)
+
+        streams: dict[str, StreamSnapshot] = {}
+        for source in self._mesh_view.sources:
+            if source.internal:
+                continue
+            members = sorted(
+                members_by_label.get(source.label, []), key=lambda e: e.name.lower()
+            )
+            speaker_names = {
+                player.name
+                for player in self._mesh_view.players
+                if player.player_id in source.player_ids
+                or (source.group_id is not None and player.group_id == source.group_id)
+            }
+            speaker_names.update(e.name for e in members)
+            media = self._media_for(source.key)
+            progress = media.progress if media is not None else None
+            streams[source.key] = StreamSnapshot(
+                key=source.key,
+                unit_id=source.unit_id,
+                unit_name=source.unit_name,
+                unit_host=source.unit_host,
+                source_id=source.source_id,
+                name=f"{source.name}{source.label_suffix}",
+                label=source.label,
+                kind=source.kind,
+                live=source.key in live_keys,
+                streaming=source.streaming and not expired,
+                members=tuple(e.frozen_url for e in members),
+                speaker_names=tuple(sorted(speaker_names, key=str.lower)),
+                source_volume=source.source_volume,
+                source_muted=source.source_muted,
+                supports_source_volume=source.supports_source_volume,
+                media_title=media.title if media else None,
+                media_artist=media.artist if media else None,
+                media_album=media.album if media else None,
+                media_album_artist=media.album_artist if media else None,
+                media_position=progress.position_s if progress else None,
+                media_position_updated_at=progress.updated_at if progress else None,
+                media_duration=progress.duration_s if progress else None,
+                media_state=_transport_state(media),
+                media_commands=media.supported_commands if media else (),
+                media_repeat=media.repeat if media else None,
+                media_shuffle=media.shuffle if media else None,
+                media_link=source.key if media is not None else None,
+            )
+        return streams
 
     def _foreign_servers(self) -> tuple[tuple[str, str], ...]:
         """Other Sendspin servers a speaker could be handed to.

@@ -117,6 +117,55 @@ class EndpointSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamSnapshot:
+    """One mesh source — a stream — as of the last publish.
+
+    Keyed on `MeshSource.key`, which is built from the unit's *configured*
+    inputs. A unit publishes every input whether or not a sender is connected,
+    so the set of streams is as durable as the set of speakers: a stream that
+    starts or stops changes state, never the entity registry.
+    """
+
+    key: str
+    unit_id: str
+    unit_name: str
+    unit_host: str
+    source_id: str
+    name: str
+    """The source's own name, with any suffix that keeps its label unique."""
+    label: str
+    """What an endpoint's source dropdown calls this stream."""
+    kind: str | None = None
+    live: bool = False
+    """A sender is feeding it (`active or streaming`), the same test that puts
+    it in an endpoint's dropdown."""
+    streaming: bool = False
+
+    members: tuple[str, ...] = ()
+    """Frozen URLs of the *adopted* endpoints on this stream, in name order."""
+    speaker_names: tuple[str, ...] = ()
+    """Every speaker the mesh shows on this stream, adopted or not."""
+
+    source_volume: int | None = None
+    """The level on the sending device, 0-100. None when unknown."""
+    source_muted: bool | None = None
+    supports_source_volume: bool = False
+
+    media_title: str | None = None
+    media_artist: str | None = None
+    media_album: str | None = None
+    media_album_artist: str | None = None
+    media_position: float | None = None
+    media_position_updated_at: float | None = None
+    media_duration: float | None = None
+    media_state: str | None = None
+    media_commands: tuple[str, ...] = ()
+    media_repeat: str | None = None
+    media_shuffle: bool | None = None
+    media_link: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SendspinData:
     """Everything the entities render, rebuilt on each server event."""
 
@@ -136,6 +185,11 @@ class SendspinData:
     resolved against, so a stream that dies while selected can still be named.
     Empty with no Plum mesh on the network, which is a legitimate state rather
     than an error: the integration still adopts and controls speakers."""
+
+    streams: dict[str, StreamSnapshot] = field(default_factory=dict)
+    """Every routable mesh source, live or not, keyed on `MeshSource.key`.
+
+    Internal sources (calibration tones) are never here."""
 
     live_sources: tuple[MeshSource, ...] = ()
     """The subset something is actually feeding, in dropdown order.

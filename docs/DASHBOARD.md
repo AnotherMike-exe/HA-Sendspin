@@ -74,9 +74,9 @@ The state is still `playing` or `paused`.
 
 ## Volume
 
-The volume of the entity is the **endpoint** level: the gain of that one
-speaker. Plum-Audio has two more volumes, the group level and the source level.
-The entity does not read them and does not change them.
+The volume of a speaker entity is the **endpoint** level: the gain of that one
+speaker. The source level is on the [stream entity](#stream-entities). The
+group level is not offered.
 
 | Who holds the speaker | Slider, step and mute |
 |---|---|
@@ -97,3 +97,40 @@ One press of volume up or volume down moves the level by 5 percent.
 
 A speaker that another server holds stays available. The `held_by` attribute
 names the server. The track and the cover show only in `playing` and `paused`.
+
+## Stream entities
+
+Each routable input of a Plum-Audio unit is also a `media_player`, named by its
+dropdown label and grouped under a device for the unit. A unit publishes every
+configured input, so these entities are as durable as the speakers.
+
+| Control | Acts on |
+|---|---|
+| Play, pause, next, previous, repeat, shuffle | The stream, as for a speaker on it |
+| Volume and mute | The **source** level: the phone's AirPlay slider, Spotify Connect's device volume. `POST /api/mesh/source-volume` on the owning unit. Offered only when the source accepts one and has reported a level, so never on Bluetooth |
+| Source dropdown | Every adopted speaker on the stream, each moved by its own `select_source`. No dropdown while no adopted speaker is on it |
+
+| State | Meaning |
+|---|---|
+| `off` | Nothing feeds the input |
+| `playing` / `paused` | The stream's transport |
+| `idle` | A sender is connected and nothing plays |
+| `unavailable` | The mesh no longer lists the input |
+
+| Attribute | Value |
+|---|---|
+| `endpoints` | Entity ids of the adopted speakers on the stream |
+| `speakers` | Names of every speaker the mesh shows on it, adopted or not |
+| `source_label` | The label the speakers' dropdowns use for it |
+
+A card that shows a stream only while it plays to something:
+
+```yaml
+type: media-control
+entity: media_player.living_room_living_room_airplay_1
+visibility:
+  - condition: template
+    value_template: >-
+      {{ states(entity) in ['playing', 'paused']
+         and state_attr(entity, 'endpoints') | count > 0 }}
+```

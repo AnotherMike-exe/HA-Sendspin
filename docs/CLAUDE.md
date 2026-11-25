@@ -28,9 +28,13 @@ and independently of Music Assistant.
 - **Other servers as sources** — a speaker can be handed to Music Assistant and
   taken back, in the same dropdown as the mesh's own streams.
 
-**Not offered, by decision**: volume for a speaker another server holds, and
-any entity for a source, a group or a stream. See `docs/OPEN-QUESTIONS.md` §8
-and §9. The entity volume is the **endpoint** level only.
+**Stream entities** — one `media_player` per configured mesh source, with the
+stream's now-playing and transport, the **source** volume, and a dropdown that
+moves every speaker on it. See `docs/OPEN-QUESTIONS.md` §9a.
+
+**Not offered, by decision**: volume for a speaker another server holds, a
+group-level volume, and any group entity. See `docs/OPEN-QUESTIONS.md` §8, §9
+and §9a. A speaker entity's volume is the **endpoint** level only.
 
 ### Why this exists
 Music Assistant already provides discovery, `media_player` entities, and

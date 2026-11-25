@@ -527,6 +527,22 @@ What the code does with them, as of the `feature/dashboard-controls` branch:
 
 Not proven on a live Home Assistant yet. See the list in §10.
 
+## 9a. Stream entities — 🟢 decided 2026-11-24, amends §8 and §9
+
+The owner reversed one line of §9 the same day: each routable mesh source gets
+a `media_player`, so a dashboard can show one card per stream with its own
+metadata, transport and volume, and the speakers on it beneath.
+
+| Decision | Why |
+|---|---|
+| One entity per configured, non-internal source, keyed `source:<unit_id>:<source_id>`. Never removed. | A unit publishes every configured input, so the set is durable. A stream starting or stopping is state, not registry churn. |
+| Its volume is the **source** level (`/api/mesh/source-volume`). | §8 option 2. It is the one level that is unambiguously the stream's, and it stacks with the endpoint levels. The group level is still not offered. |
+| Its `select_source` calls each member speaker's own `select_source`. | A group move must route exactly as single moves do. Routing is still only the speaker's dropdown. |
+| Members are an attribute, `endpoints`. No `GROUPING`, no `group_members`, no join. | §9's grouping rule stands. |
+
+Still ruled out: a group-level volume entity, and any entity for a server that
+has no mesh API (Music Assistant).
+
 ## 10. Other servers in the source dropdown — 🟡 needs a decision
 
 **Question**: does another Sendspin server, such as Music Assistant, stay in
